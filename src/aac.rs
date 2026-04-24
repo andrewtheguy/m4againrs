@@ -1335,6 +1335,13 @@ fn apply_gain_to_file_data(
 ) -> Result<usize> {
     const PATCH_CHUNK_SIZE: u64 = 1024 * 1024;
 
+    // The chunking loop assumes sorted locations: idx selects chunk_start,
+    // PATCH_CHUNK_SIZE only extends forward, and write_bits_u8 uses
+    // loc.file_offset - chunk_start after adjust_gain_value decides to patch.
+    assert!(locations
+        .windows(2)
+        .all(|pair| pair[0].file_offset <= pair[1].file_offset));
+
     let mut modified = 0usize;
     let mut idx = 0usize;
     let mut buf = Vec::new();
