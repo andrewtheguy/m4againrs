@@ -1,10 +1,8 @@
+import importlib.machinery
 import importlib.util
 import os
-import platform
 import shutil
-import subprocess
 import struct
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -249,77 +247,48 @@ def _parse_itunes_tags(buf):
 def _find_module():
     env = os.environ.get("MP4GAINPY_PYTHON_MODULE")
     if env:
-        return Path(env)
+        path = Path(env)
+        if path.exists():
+            return path
+        raise FileNotFoundError(f"MP4GAINPY_PYTHON_MODULE points to a missing file: {path}")
 
-    system = platform.system()
-    if system == "Linux":
-        extensions = [".so"]
-        prefixes = ["libmp4gainpy", "mp4gainpy"]
-    elif system == "Darwin":
-        extensions = [".dylib", ".so"]
-        prefixes = ["libmp4gainpy", "mp4gainpy"]
-    elif system == "Windows":
-        extensions = [".pyd", ".dll"]
-        prefixes = ["mp4gainpy"]
-    else:
-        extensions = [".so"]
-        prefixes = ["libmp4gainpy", "mp4gainpy"]
+    suffixes = list(importlib.machinery.EXTENSION_SUFFIXES)
+    for fallback_suffix in (".so", ".dylib", ".pyd", ".dll"):
+        if fallback_suffix not in suffixes:
+            suffixes.append(fallback_suffix)
 
-    for prefix in prefixes:
-        for ext in extensions:
-            candidate = PROJECT_ROOT / "target" / "maturin" / f"{prefix}{ext}"
-            if candidate.exists():
-                return candidate
+    candidates = []
+    for target_dir in ("debug", "release"):
+        for stem in ("libmp4gainpy", "mp4gainpy"):
+            for suffix in suffixes:
+                candidates.append(PROJECT_ROOT / "target" / target_dir / f"{stem}{suffix}")
 
-    for build_type in ["debug", "release"]:
-        for prefix in prefixes:
-            for ext in extensions:
-                candidate = PROJECT_ROOT / "target" / build_type / f"{prefix}{ext}"
-                if candidate.exists():
-                    return candidate
+    for path in candidates:
+        if path.exists():
+            return path
 
-    return None
-
-
-def _build_module():
-    subprocess.run(
-        [
-            "uv",
-            "run",
-            "--no-project",
-            "--with",
-            "maturin>=1.9.4,<2.0",
-            "maturin",
-            "develop",
-            "--skip-install",
-            "--features",
-            "python",
-        ],
-        cwd=PROJECT_ROOT,
-        check=True,
+    raise FileNotFoundError(
+        "Could not find the built mp4gainpy extension. "
+        "Build it first with `cargo build --features python --lib` "
+        "or `maturin develop --skip-install --features python`."
     )
 
 
 def _load_module():
-    # Do not import an installed mp4gainpy package here. Local tests should
-    # always exercise the just-built extension from target/maturin, otherwise
-    # a stale site-packages copy can mask Rust changes.
-    if "MP4GAINPY_PYTHON_MODULE" not in os.environ:
-        _build_module()
-
     path = _find_module()
-    if path is None:
-        raise RuntimeError(
-            "Could not find mp4gainpy module. "
-            "Run `uv run --no-project --with maturin maturin develop "
-            "--skip-install --features python` first, "
-            "or set MP4GAINPY_PYTHON_MODULE to the shared library path."
-        )
     spec = importlib.util.spec_from_file_location("mp4gainpy", str(path))
     if spec is None or spec.loader is None:
+        if path.suffix in {".dylib", ".dll"}:
+            spec = importlib.util.spec_from_file_location(
+                "mp4gainpy",
+                str(path),
+                loader=importlib.machinery.ExtensionFileLoader("mp4gainpy", str(path)),
+            )
+
+    if spec is None or spec.loader is None:
         raise RuntimeError(f"Could not load mp4gainpy module from {path}")
+
     mod = importlib.util.module_from_spec(spec)
-    sys.modules["mp4gainpy"] = mod
     spec.loader.exec_module(mod)
     return mod
 

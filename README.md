@@ -77,9 +77,8 @@ uv run --no-project --with 'maturin>=1.9.4,<2.0' maturin develop --skip-install 
 uv run --no-sync python -m unittest tests/test_python_bindings.py -v
 ```
 
-The test loader also runs the `maturin develop --skip-install` build itself
-and imports the generated extension from `target/maturin`, not from an
-installed `site-packages` copy.
+The Python binding tests load the built extension from `target/debug` or
+`target/release`; they do not import an installed `site-packages` copy.
 
 The `tests/testdata/tagged_tone.m4a` fixture is committed; to regenerate it
 with ffmpeg, run `testdata/regenerate.sh`.
