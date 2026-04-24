@@ -420,7 +420,10 @@ fn adjust_co64_offsets(
 }
 
 fn is_container_box(box_type: u32) -> bool {
-    matches!(box_type, MOOV | TRAK | MDIA | MINF | STBL | UDTA | META)
+    matches!(
+        box_type,
+        MOOV | TRAK | MDIA | MINF | STBL | UDTA | META | ILST
+    )
 }
 
 fn make_box(box_type: u32, payload: &[u8]) -> std::io::Result<Vec<u8>> {
