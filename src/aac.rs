@@ -163,7 +163,9 @@ impl<'a> BitReader<'a> {
     }
 
     fn bits_remaining(&self) -> usize {
-        self.data.len().saturating_sub(self.byte_pos) * 8 - self.bit_pos as usize
+        let remaining_bytes = self.data.len().saturating_sub(self.byte_pos);
+        let total_bits = remaining_bytes.saturating_mul(8);
+        total_bits.saturating_sub(self.bit_pos as usize)
     }
 
     fn read_bits(&mut self, n: u8) -> Result<u32> {
