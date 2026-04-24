@@ -159,11 +159,8 @@ pub(crate) fn is_mp4(data: &[u8]) -> bool {
 /// Record the gain operation in custom `moov/udta/meta/ilst/M4AG` metadata.
 /// ffprobe exposes this as `TAG:M4AG` when called with `-export_all 1`.
 pub(crate) fn write_gain_metadata(file: &mut File, gain_steps: i32) -> std::io::Result<()> {
-    file.seek(SeekFrom::Start(0))?;
-    let mut data = Vec::new();
-    file.read_to_end(&mut data)?;
-
-    let (moov_pos, moov_header) = find_box(&data, MOOV)
+    let file_len = file.seek(SeekFrom::End(0))?;
+    let (moov_pos, moov_size, moov_header) = find_top_level_box_in_file(file, MOOV, file_len)?
         .ok_or_else(|| invalid_data("cannot write gain metadata: no moov box"))?;
     if moov_header.header_size != 8 {
         return Err(invalid_data(
@@ -171,24 +168,71 @@ pub(crate) fn write_gain_metadata(file: &mut File, gain_steps: i32) -> std::io::
         ));
     }
 
-    let moov_size = checked_usize(moov_header.size, "moov box too large")?;
-    let moov_end = checked_add(moov_pos, moov_size, "moov box range overflow")?;
-    if moov_end > data.len() {
-        return Err(invalid_data("cannot write gain metadata: moov box truncated"));
-    }
+    let moov_size_usize = checked_usize(moov_size, "moov box too large")?;
+    let moov_end = moov_pos
+        .checked_add(moov_size)
+        .ok_or_else(|| invalid_data("moov box range overflow"))?;
 
-    let old_moov = &data[moov_pos..moov_end];
-    let old_moov_end = moov_end as u64;
-    let mut new_moov = with_gain_description(old_moov, gain_steps)?;
+    let mut old_moov = vec![0u8; moov_size_usize];
+    file.seek(SeekFrom::Start(moov_pos))?;
+    file.read_exact(&mut old_moov)?;
+
+    let old_moov_end = moov_end;
+    let mut new_moov = with_gain_description(&old_moov, gain_steps)?;
     let delta = new_moov.len() as i64 - old_moov.len() as i64;
     adjust_chunk_offsets_after(&mut new_moov, old_moov_end, delta)?;
 
-    data.splice(moov_pos..moov_end, new_moov);
-
-    file.seek(SeekFrom::Start(0))?;
-    file.set_len(0)?;
-    file.write_all(&data)?;
+    replace_file_range(file, moov_pos, moov_size, &new_moov, file_len)?;
     file.flush()
+}
+
+fn find_top_level_box_in_file(
+    file: &mut File,
+    box_type: u32,
+    file_len: u64,
+) -> std::io::Result<Option<(u64, u64, BoxHeader)>> {
+    file.seek(SeekFrom::Start(0))?;
+
+    while file.stream_position()? + 8 <= file_len {
+        let pos = file.stream_position()?;
+        let Some(header) = BoxHeader::read(file)? else {
+            break;
+        };
+        let size = effective_top_level_box_size(&header, pos, file_len)?;
+
+        if header.box_type == box_type {
+            return Ok(Some((pos, size, header)));
+        }
+
+        file.seek(SeekFrom::Start(pos + size))?;
+    }
+
+    Ok(None)
+}
+
+fn effective_top_level_box_size(
+    header: &BoxHeader,
+    pos: u64,
+    file_len: u64,
+) -> std::io::Result<u64> {
+    let size = if header.size == 0 {
+        file_len.saturating_sub(pos)
+    } else {
+        header.size
+    };
+
+    if size < header.header_size as u64 {
+        return Err(invalid_data("invalid MP4 box size"));
+    }
+
+    let end = pos
+        .checked_add(size)
+        .ok_or_else(|| invalid_data("MP4 box range overflow"))?;
+    if end > file_len {
+        return Err(invalid_data("MP4 box extends past end of file"));
+    }
+
+    Ok(size)
 }
 
 fn with_gain_description(moov: &[u8], gain_steps: i32) -> std::io::Result<Vec<u8>> {
@@ -307,6 +351,98 @@ fn text_ilst_item(item_type: u32, text: &[u8]) -> std::io::Result<Vec<u8>> {
     data_payload.extend_from_slice(text);
 
     make_box(item_type, &make_box(DATA, &data_payload)?)
+}
+
+fn replace_file_range(
+    file: &mut File,
+    start: u64,
+    old_len: u64,
+    replacement: &[u8],
+    file_len: u64,
+) -> std::io::Result<()> {
+    let old_end = start
+        .checked_add(old_len)
+        .ok_or_else(|| invalid_data("file range overflow"))?;
+    if old_end > file_len {
+        return Err(invalid_data("file range extends past end of file"));
+    }
+
+    let new_len =
+        u64::try_from(replacement.len()).map_err(|_| invalid_data("replacement too large"))?;
+
+    match new_len.cmp(&old_len) {
+        std::cmp::Ordering::Greater => {
+            let delta = new_len - old_len;
+            let new_file_len = file_len
+                .checked_add(delta)
+                .ok_or_else(|| invalid_data("file length overflow"))?;
+            file.set_len(new_file_len)?;
+            shift_file_tail_right(file, old_end, file_len, delta)?;
+        }
+        std::cmp::Ordering::Less => {
+            let delta = old_len - new_len;
+            file.seek(SeekFrom::Start(start))?;
+            file.write_all(replacement)?;
+            shift_file_tail_left(file, old_end, file_len, delta)?;
+            file.set_len(file_len - delta)?;
+            return Ok(());
+        }
+        std::cmp::Ordering::Equal => {}
+    }
+
+    file.seek(SeekFrom::Start(start))?;
+    file.write_all(replacement)
+}
+
+fn shift_file_tail_right(
+    file: &mut File,
+    start: u64,
+    end: u64,
+    delta: u64,
+) -> std::io::Result<()> {
+    const MOVE_BUF_SIZE: usize = 1024 * 1024;
+
+    let mut buf = vec![0u8; MOVE_BUF_SIZE];
+    let mut read_end = end;
+    while read_end > start {
+        let chunk_len = usize::try_from((read_end - start).min(MOVE_BUF_SIZE as u64))
+            .map_err(|_| invalid_data("move chunk too large"))?;
+        let read_start = read_end - chunk_len as u64;
+
+        file.seek(SeekFrom::Start(read_start))?;
+        file.read_exact(&mut buf[..chunk_len])?;
+        file.seek(SeekFrom::Start(read_start + delta))?;
+        file.write_all(&buf[..chunk_len])?;
+
+        read_end = read_start;
+    }
+
+    Ok(())
+}
+
+fn shift_file_tail_left(
+    file: &mut File,
+    start: u64,
+    end: u64,
+    delta: u64,
+) -> std::io::Result<()> {
+    const MOVE_BUF_SIZE: usize = 1024 * 1024;
+
+    let mut buf = vec![0u8; MOVE_BUF_SIZE];
+    let mut read_start = start;
+    while read_start < end {
+        let chunk_len = usize::try_from((end - read_start).min(MOVE_BUF_SIZE as u64))
+            .map_err(|_| invalid_data("move chunk too large"))?;
+
+        file.seek(SeekFrom::Start(read_start))?;
+        file.read_exact(&mut buf[..chunk_len])?;
+        file.seek(SeekFrom::Start(read_start - delta))?;
+        file.write_all(&buf[..chunk_len])?;
+
+        read_start += chunk_len as u64;
+    }
+
+    Ok(())
 }
 
 fn adjust_chunk_offsets_after(
