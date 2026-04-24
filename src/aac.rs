@@ -7,6 +7,7 @@
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::sync::OnceLock;
 
 use crate::aac_codebooks;
 use crate::bits::{adjust_gain_value, read_bits_u8, write_bits_u8};
@@ -39,8 +40,8 @@ pub(crate) fn analyze_file(src: &mut File) -> Result<AacGainPlan> {
 }
 
 /// Apply gain to a source file while keeping memory bounded by metadata and
-/// one AAC sample. The source is copied to `dst`, then only the located
-/// `global_gain` bits are patched in `dst`.
+/// one patch chunk. The source is copied to `dst`, then only chunks containing
+/// located `global_gain` bits are patched in `dst`.
 pub(crate) fn apply_gain_plan_to_file(
     src: &mut File,
     dst: &mut File,
@@ -328,25 +329,65 @@ impl<'a> BitReader<'a> {
     }
 
     fn read_bits(&mut self, n: u8) -> Result<u32> {
-        let mut val = 0u32;
-        for _ in 0..n {
-            if self.byte_pos >= self.data.len() {
-                return Err(Error::AacParse {
-                    message: "unexpected end of bitstream".into(),
-                });
-            }
-            val = (val << 1) | ((self.data[self.byte_pos] >> (7 - self.bit_pos)) & 1) as u32;
-            self.bit_pos += 1;
-            if self.bit_pos == 8 {
-                self.bit_pos = 0;
-                self.byte_pos += 1;
-            }
+        let bits_to_read = n as usize;
+        if bits_to_read == 0 {
+            return Ok(0);
         }
-        Ok(val)
+
+        let value = self.peek_bits(n)?;
+        self.advance_bits(bits_to_read);
+
+        Ok(value)
+    }
+
+    fn peek_bits(&self, n: u8) -> Result<u32> {
+        let bits_to_read = n as usize;
+        if bits_to_read == 0 {
+            return Ok(0);
+        }
+
+        if self.bits_remaining() < bits_to_read {
+            return Err(Error::AacParse {
+                message: "unexpected end of bitstream".into(),
+            });
+        }
+
+        let bytes_needed = (self.bit_pos as usize + bits_to_read).div_ceil(8);
+        let mut window = 0u64;
+        for byte in &self.data[self.byte_pos..self.byte_pos + bytes_needed] {
+            window = (window << 8) | u64::from(*byte);
+        }
+
+        let window_bits = bytes_needed * 8;
+        let shift = window_bits - self.bit_pos as usize - bits_to_read;
+        let mask = if n == 32 {
+            u64::from(u32::MAX)
+        } else {
+            (1u64 << bits_to_read) - 1
+        };
+        Ok(((window >> shift) & mask) as u32)
+    }
+
+    fn advance_bits(&mut self, bits_to_advance: usize) {
+        let next_bit = self.byte_pos * 8 + self.bit_pos as usize + bits_to_advance;
+        self.byte_pos = next_bit / 8;
+        self.bit_pos = (next_bit % 8) as u8;
     }
 
     fn read_bit(&mut self) -> Result<bool> {
-        Ok(self.read_bits(1)? != 0)
+        if self.byte_pos >= self.data.len() {
+            return Err(Error::AacParse {
+                message: "unexpected end of bitstream".into(),
+            });
+        }
+
+        let bit = ((self.data[self.byte_pos] >> (7 - self.bit_pos)) & 1) != 0;
+        self.bit_pos += 1;
+        if self.bit_pos == 8 {
+            self.bit_pos = 0;
+            self.byte_pos += 1;
+        }
+        Ok(bit)
     }
 
     fn skip_bits(&mut self, n: usize) -> Result<()> {
@@ -374,13 +415,94 @@ impl<'a> BitReader<'a> {
 // Huffman decoder
 // ---------------------------------------------------------------------------
 
-fn decode_huffman(reader: &mut BitReader, lens: &[u8], codes: &[u32]) -> Result<usize> {
+#[derive(Clone, Copy)]
+struct HuffmanEntry {
+    symbol: u16,
+    len: u8,
+}
+
+struct HuffmanTable {
+    lens: &'static [u8],
+    codes: &'static [u32],
+    max_len: u8,
+    entries: Vec<HuffmanEntry>,
+}
+
+impl HuffmanTable {
+    fn new(lens: &'static [u8], codes: &'static [u32], max_len: u8) -> Self {
+        let size = 1usize << max_len;
+        let mut entries = vec![HuffmanEntry { symbol: 0, len: 0 }; size];
+
+        for (symbol, (&len, &code)) in lens.iter().zip(codes.iter()).enumerate() {
+            if len == 0 {
+                continue;
+            }
+
+            let prefix = (code as usize) << (max_len - len);
+            let fill = 1usize << (max_len - len);
+            for slot in entries.iter_mut().skip(prefix).take(fill) {
+                *slot = HuffmanEntry {
+                    symbol: symbol as u16,
+                    len,
+                };
+            }
+        }
+
+        Self {
+            lens,
+            codes,
+            max_len,
+            entries,
+        }
+    }
+}
+
+static SCF_HUFFMAN_TABLE: OnceLock<HuffmanTable> = OnceLock::new();
+static SPECTRUM_HUFFMAN_TABLES: OnceLock<Vec<HuffmanTable>> = OnceLock::new();
+
+fn scf_huffman_table() -> &'static HuffmanTable {
+    SCF_HUFFMAN_TABLE.get_or_init(|| {
+        HuffmanTable::new(
+            &aac_codebooks::SCF_CB_LENS,
+            &aac_codebooks::SCF_CB_CODES,
+            aac_codebooks::SCF_CB_MAX_LEN,
+        )
+    })
+}
+
+fn spectrum_huffman_tables() -> &'static [HuffmanTable] {
+    SPECTRUM_HUFFMAN_TABLES.get_or_init(|| {
+        aac_codebooks::SPECTRUM_CODEBOOKS
+            .iter()
+            .map(|codebook| HuffmanTable::new(codebook.lens, codebook.codes, codebook.max_len))
+            .collect()
+    })
+}
+
+fn decode_huffman(reader: &mut BitReader, table: &HuffmanTable) -> Result<usize> {
+    if reader.bits_remaining() >= table.max_len as usize {
+        let bits = reader.peek_bits(table.max_len)? as usize;
+        let entry = table.entries[bits];
+        if entry.len != 0 {
+            reader.advance_bits(entry.len as usize);
+            return Ok(entry.symbol as usize);
+        }
+    }
+
+    decode_huffman_slow(reader, table.lens, table.codes, table.max_len)
+}
+
+fn decode_huffman_slow(
+    reader: &mut BitReader,
+    lens: &[u8],
+    codes: &[u32],
+    max_len: u8,
+) -> Result<usize> {
     let mut code: u32 = 0;
     let mut bits_read: u8 = 0;
-    let max_len = *lens.iter().max().unwrap_or(&0);
 
     for _ in 0..max_len {
-        code = (code << 1) | reader.read_bits(1)?;
+        code = (code << 1) | u32::from(reader.read_bit()?);
         bits_read += 1;
 
         for (i, (&len, &cw)) in lens.iter().zip(codes.iter()).enumerate() {
@@ -833,6 +955,7 @@ fn parse_scale_factor_data(
     section: &SectionData,
 ) -> Result<()> {
     let mut noise_pcm_flag = true;
+    let scf_table = scf_huffman_table();
 
     for g in 0..info.window_groups {
         for sfb in 0..info.max_sfb {
@@ -845,11 +968,7 @@ fn parse_scale_factor_data(
                 noise_pcm_flag = false;
                 continue;
             }
-            decode_huffman(
-                reader,
-                &aac_codebooks::SCF_CB_LENS,
-                &aac_codebooks::SCF_CB_CODES,
-            )?;
+            decode_huffman(reader, scf_table)?;
         }
     }
     Ok(())
@@ -861,6 +980,8 @@ fn parse_spectral_data(
     section: &SectionData,
     bands: &[usize],
 ) -> Result<()> {
+    let huffman_tables = spectrum_huffman_tables();
+
     for g in 0..info.window_groups {
         for _w in 0..info.window_group_len[g] {
             for sfb in 0..info.max_sfb {
@@ -879,9 +1000,10 @@ fn parse_spectral_data(
                 let cb_info = &aac_codebooks::SPECTRUM_CODEBOOKS[cb_idx as usize - 1];
                 let dim = cb_info.dimension as usize;
                 let num_codewords = width / dim;
+                let huffman_table = &huffman_tables[cb_idx as usize - 1];
 
                 for _ in 0..num_codewords {
-                    let symbol = decode_huffman(reader, cb_info.lens, cb_info.codes)?;
+                    let symbol = decode_huffman(reader, huffman_table)?;
 
                     if cb_info.is_unsigned {
                         if cb_info.dimension == 4 {
@@ -1211,26 +1333,65 @@ fn apply_gain_to_file_data(
     locations: &[AacGainLocation],
     gain_steps: i32,
 ) -> Result<usize> {
+    const PATCH_CHUNK_SIZE: u64 = 1024 * 1024;
+
     let mut modified = 0usize;
-    let mut buf = [0u8; 2];
+    let mut idx = 0usize;
+    let mut buf = Vec::new();
 
-    for loc in locations {
-        if loc.original_gain == 0 {
-            continue;
+    while idx < locations.len() {
+        let Some(first_idx) = locations[idx..].iter().position(|loc| {
+            loc.original_gain != 0
+                && adjust_gain_value(loc.original_gain, gain_steps) != loc.original_gain
+        }) else {
+            break;
+        };
+        idx += first_idx;
+
+        let chunk_start = locations[idx].file_offset;
+        let chunk_limit = chunk_start.saturating_add(PATCH_CHUNK_SIZE);
+        let mut chunk_end = chunk_start;
+        let mut end_idx = idx;
+
+        while end_idx < locations.len() {
+            let loc = &locations[end_idx];
+            let new_value = adjust_gain_value(loc.original_gain, gain_steps);
+            let will_modify = loc.original_gain != 0 && new_value != loc.original_gain;
+            let loc_len = if loc.bit_offset == 0 { 1 } else { 2 };
+            let loc_end = loc.file_offset + loc_len;
+
+            if loc_end > chunk_limit && chunk_end > chunk_start {
+                break;
+            }
+
+            if will_modify {
+                chunk_end = chunk_end.max(loc_end);
+            }
+            end_idx += 1;
         }
 
-        let new_value = adjust_gain_value(loc.original_gain, gain_steps);
-        if new_value == loc.original_gain {
-            continue;
+        buf.resize((chunk_end - chunk_start) as usize, 0);
+        file.seek(SeekFrom::Start(chunk_start))?;
+        file.read_exact(&mut buf)?;
+
+        for loc in &locations[idx..end_idx] {
+            if loc.original_gain == 0 {
+                continue;
+            }
+
+            let new_value = adjust_gain_value(loc.original_gain, gain_steps);
+            if new_value == loc.original_gain {
+                continue;
+            }
+
+            let offset = (loc.file_offset - chunk_start) as usize;
+            write_bits_u8(&mut buf[offset..], 0, loc.bit_offset, new_value);
+            modified += 1;
         }
 
-        let len = if loc.bit_offset == 0 { 1 } else { 2 };
-        file.seek(SeekFrom::Start(loc.file_offset))?;
-        file.read_exact(&mut buf[..len])?;
-        write_bits_u8(&mut buf[..len], 0, loc.bit_offset, new_value);
-        file.seek(SeekFrom::Start(loc.file_offset))?;
-        file.write_all(&buf[..len])?;
-        modified += 1;
+        file.seek(SeekFrom::Start(chunk_start))?;
+        file.write_all(&buf)?;
+        idx = end_idx;
     }
 
     Ok(modified)
