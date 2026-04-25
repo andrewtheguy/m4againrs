@@ -30,26 +30,23 @@ jobs:
           python - <<'PY'
           import os
           import pathlib
-          import re
           import subprocess
+          import tomllib
 
-          root = pathlib.Path(".")
-          pyproject = (root / "python" / "pyproject.toml").read_text()
+          manifest = tomllib.loads(pathlib.Path("Cargo.toml").read_text())
+          try:
+              workspace_version = manifest["workspace"]["package"]["version"]
+          except KeyError as exc:
+              raise SystemExit(f"Could not determine workspace version from Cargo.toml: missing {exc}")
 
-          pyproject_match = re.search(r'^version = "([^"]+)"$', pyproject, re.MULTILINE)
-
-          if pyproject_match is None:
-            raise SystemExit("Could not determine version from pyproject.toml")
-
-          pyproject_version = pyproject_match.group(1)
-          release_tag = f"v{pyproject_version}"
+          release_tag = f"v{workspace_version}"
 
           result = subprocess.run(
               ["gh", "api", f"repos/{os.environ['GH_REPO']}/git/ref/tags/{release_tag}"],
               capture_output=True,
           )
           if result.returncode == 0:
-            raise SystemExit(f"Tag {release_tag} already exists. Bump the version before releasing.")
+              raise SystemExit(f"Tag {release_tag} already exists. Bump the version before releasing.")
 
           print(f"Release tag: {release_tag}")
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
