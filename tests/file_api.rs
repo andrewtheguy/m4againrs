@@ -135,6 +135,30 @@ fn file_api_preserves_existing_tags_and_adds_gain_tag() {
     assert_eq!(parse_itunes_tags(&fs::read(&dst).expect("failed to read output")), expected_tags);
 }
 
+#[test]
+fn writer_api_accepts_forward_only_output() {
+    let fixture = testdata_path("test.m4a");
+    let src_bytes = fs::read(&fixture).expect("failed to read fixture");
+    let src_ranges = sample_byte_ranges(&src_bytes);
+    let mut src = fs::File::open(&fixture).expect("failed to open fixture");
+    let mut dst = Vec::new();
+
+    let modified = m4againrs::aac_apply_gain_to_writer(&mut src, &mut dst, 2)
+        .expect("writer API should accept non-seekable output");
+
+    assert!(modified > 0);
+    let dst_ranges = sample_byte_ranges(&dst);
+    assert_same_sample_sizes(&src_ranges, &dst_ranges);
+    assert!(
+        sample_payloads_differ(&src_bytes, &dst, &src_ranges, &dst_ranges),
+        "no AAC sample bytes changed"
+    );
+    assert_eq!(
+        parse_itunes_tags(&dst).get(b"M4AG".as_slice()),
+        Some(&b"m4againrs version=1 gain_steps=2 gain_step_db=1.5".to_vec())
+    );
+}
+
 fn copy_fixture(src: &Path, dst: &Path) {
     fs::copy(src, dst).expect("failed to copy fixture");
 }

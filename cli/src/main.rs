@@ -1,8 +1,10 @@
 use std::env;
+use std::fs::File;
+use std::io;
 use std::path::Path;
 use std::process::ExitCode;
 
-const USAGE: &str = "Usage: m4againrs <input.m4a> <output.m4a> <gain_steps>";
+const USAGE: &str = "Usage: m4againrs <input.m4a> <output.m4a|-> <gain_steps>";
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
@@ -32,11 +34,22 @@ fn main() -> ExitCode {
         }
     };
 
-    match m4againrs::aac_apply_gain_file(Path::new(&input), Path::new(&output), gain_steps) {
+    match run(&input, &output, gain_steps) {
         Ok(_) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e}");
             ExitCode::FAILURE
         }
     }
+}
+
+fn run(input: &str, output: &str, gain_steps: i32) -> m4againrs::Result<usize> {
+    if output == "-" {
+        let mut src = File::open(input)?;
+        let stdout = io::stdout();
+        let mut stdout = stdout.lock();
+        return m4againrs::aac_apply_gain_to_writer(&mut src, &mut stdout, gain_steps);
+    }
+
+    m4againrs::aac_apply_gain_file(Path::new(input), Path::new(output), gain_steps)
 }
