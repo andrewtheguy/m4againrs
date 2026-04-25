@@ -45,6 +45,62 @@ pub(crate) fn apply_gain_plan_to_file(
     Ok(modified)
 }
 
+/// Apply gain to an AAC/M4A byte buffer in-place. Returns the number of
+/// `global_gain` locations that were actually modified.
+#[allow(dead_code)]
+pub(crate) fn apply_gain_to_bytes(data: &mut [u8], gain_steps: i32) -> Result<usize> {
+    let locations = analyze_locations(data)?;
+    Ok(apply_gain_to_data(data, &locations, gain_steps))
+}
+
+#[allow(dead_code)]
+fn analyze_locations(data: &[u8]) -> Result<Vec<AacGainLocation>> {
+    if !mp4::is_mp4(data) {
+        return Err(Error::NotMp4);
+    }
+
+    let (sample_table, stsd_pos) = build_sample_table(data)?;
+    let sample_rate = parse_audio_config(data, stsd_pos)?;
+
+    let mut all_locations = Vec::with_capacity(sample_table.len().saturating_mul(2));
+    let mut parse_warnings = 0u32;
+
+    for entry in &sample_table {
+        let sample_start = entry.file_offset as usize;
+        let sample_end = sample_start + entry.size as usize;
+
+        if sample_end > data.len() {
+            parse_warnings += 1;
+            continue;
+        }
+
+        let sample_data = &data[sample_start..sample_end];
+        let mut reader = BitReader::new(sample_data);
+
+        let location_start = all_locations.len();
+        match parse_raw_data_block(
+            &mut reader,
+            sample_rate,
+            entry.file_offset,
+            &mut all_locations,
+        ) {
+            Ok(()) => {}
+            Err(_) => {
+                all_locations.truncate(location_start);
+                parse_warnings += 1;
+            }
+        }
+    }
+
+    if all_locations.is_empty() && parse_warnings > 0 {
+        return Err(Error::AacParseFailure {
+            warnings: parse_warnings,
+        });
+    }
+
+    Ok(all_locations)
+}
+
 fn analyze_locations_in_file(file: &mut File) -> Result<Vec<AacGainLocation>> {
     if !is_mp4_file(file)? {
         return Err(Error::NotMp4);
@@ -1295,6 +1351,28 @@ fn parse_raw_data_block(
 // ---------------------------------------------------------------------------
 // Gain read / write
 // ---------------------------------------------------------------------------
+
+#[allow(dead_code)]
+fn write_aac_gain_at(data: &mut [u8], loc: &AacGainLocation, value: u8) {
+    write_bits_u8(data, loc.file_offset as usize, loc.bit_offset, value)
+}
+
+#[allow(dead_code)]
+fn apply_gain_to_data(data: &mut [u8], locations: &[AacGainLocation], gain_steps: i32) -> usize {
+    let mut modified = 0usize;
+    for loc in locations {
+        let current = loc.original_gain;
+        if current == 0 {
+            continue;
+        }
+        let new_value = adjust_gain_value(current, gain_steps);
+        if new_value != current {
+            write_aac_gain_at(data, loc, new_value);
+            modified += 1;
+        }
+    }
+    modified
+}
 
 fn apply_gain_to_file_data(
     file: &mut File,
