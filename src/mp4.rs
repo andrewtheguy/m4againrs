@@ -367,11 +367,7 @@ fn text_ilst_item(item_type: u32, text: &[u8]) -> std::io::Result<Vec<u8>> {
     make_box(item_type, &make_box(DATA, &data_payload)?)
 }
 
-fn adjust_chunk_offsets_after(
-    moov: &mut [u8],
-    threshold: u64,
-    delta: i64,
-) -> std::io::Result<()> {
+fn adjust_chunk_offsets_after(moov: &mut [u8], threshold: u64, delta: i64) -> std::io::Result<()> {
     if delta == 0 {
         return Ok(());
     }
@@ -408,7 +404,13 @@ fn adjust_chunk_offsets_in_container(
                     child_start
                 };
                 if child_start <= box_end {
-                    adjust_chunk_offsets_in_container(data, child_start, box_end, threshold, delta)?;
+                    adjust_chunk_offsets_in_container(
+                        data,
+                        child_start,
+                        box_end,
+                        threshold,
+                        delta,
+                    )?;
                 }
             }
             _ => {}

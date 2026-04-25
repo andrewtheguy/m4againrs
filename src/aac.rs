@@ -1093,11 +1093,7 @@ fn parse_ics(
     let (byte_off, bit_off) = reader.position();
     let global_gain = reader.read_bits(8)? as u8;
 
-    let gain_loc = AacGainLocation::new(
-        sample_file_offset + byte_off as u64,
-        bit_off,
-        global_gain,
-    );
+    let gain_loc = AacGainLocation::new(sample_file_offset + byte_off as u64, bit_off, global_gain);
 
     let info = if common_window {
         shared_info.unwrap().clone()
@@ -1156,13 +1152,7 @@ fn parse_sce(
     locations: &mut Vec<AacGainLocation>,
 ) -> Result<()> {
     let _tag = reader.read_bits(4)?;
-    let (loc, _) = parse_ics(
-        reader,
-        false,
-        None,
-        sample_rate,
-        sample_file_offset,
-    )?;
+    let (loc, _) = parse_ics(reader, false, None, sample_rate, sample_file_offset)?;
     locations.push(loc);
     Ok(())
 }
@@ -1294,20 +1284,10 @@ fn parse_raw_data_block(
 
         match id {
             ID_SCE | ID_LFE => {
-                parse_sce(
-                    reader,
-                    sample_rate,
-                    sample_file_offset,
-                    locations,
-                )?;
+                parse_sce(reader, sample_rate, sample_file_offset, locations)?;
             }
             ID_CPE => {
-                parse_cpe(
-                    reader,
-                    sample_rate,
-                    sample_file_offset,
-                    locations,
-                )?;
+                parse_cpe(reader, sample_rate, sample_file_offset, locations)?;
             }
             ID_CCE => {
                 return Err(Error::AacParse {
