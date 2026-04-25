@@ -641,3 +641,87 @@ fn checked_usize(value: u64, message: &'static str) -> std::io::Result<usize> {
 fn invalid_data(message: &'static str) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, message)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_box(box_type: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let size = 8 + payload.len();
+        let mut out = Vec::with_capacity(size);
+        out.extend_from_slice(&(size as u32).to_be_bytes());
+        out.extend_from_slice(box_type);
+        out.extend_from_slice(payload);
+        out
+    }
+
+    fn make_ftyp(major_brand: &[u8; 4], compatible_brands: &[[u8; 4]]) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(8 + compatible_brands.len() * 4);
+        payload.extend_from_slice(major_brand);
+        payload.extend_from_slice(&0u32.to_be_bytes());
+        for brand in compatible_brands {
+            payload.extend_from_slice(brand);
+        }
+        make_box(b"ftyp", &payload)
+    }
+
+    #[test]
+    fn box_header_reads_normal_and_extended_sizes() {
+        let normal = make_box(b"free", &[1, 2, 3, 4]);
+        let mut reader = Cursor::new(normal);
+        let header = BoxHeader::read(&mut reader).unwrap().unwrap();
+        assert_eq!(header.size, 12);
+        assert_eq!(header.box_type, u32::from_be_bytes(*b"free"));
+        assert_eq!(header.header_size, 8);
+        assert_eq!(header.content_size(), 4);
+
+        let mut extended = Vec::new();
+        extended.extend_from_slice(&1u32.to_be_bytes());
+        extended.extend_from_slice(b"wide");
+        extended.extend_from_slice(&20u64.to_be_bytes());
+        extended.extend_from_slice(&[0, 0, 0, 0]);
+        let mut reader = Cursor::new(extended);
+        let header = BoxHeader::read(&mut reader).unwrap().unwrap();
+        assert_eq!(header.size, 20);
+        assert_eq!(header.box_type, u32::from_be_bytes(*b"wide"));
+        assert_eq!(header.header_size, 16);
+        assert_eq!(header.content_size(), 4);
+    }
+
+    #[test]
+    fn find_box_walks_top_level_boxes() {
+        let mut data = make_box(b"free", &[0; 3]);
+        let moov_pos = data.len();
+        data.extend_from_slice(&make_box(b"moov", &[1, 2]));
+
+        let (pos, header) = find_box(&data, MOOV).unwrap();
+
+        assert_eq!(pos, moov_pos);
+        assert_eq!(header.size, 10);
+        assert_eq!(header.content_size(), 2);
+        assert!(find_box(&data, TRAK).is_none());
+    }
+
+    #[test]
+    fn find_box_in_container_finds_child_inside_range() {
+        let child = make_box(b"stbl", &[9, 8, 7]);
+        let mut payload = make_box(b"free", &[0]);
+        let child_pos_in_payload = payload.len();
+        payload.extend_from_slice(&child);
+        let data = make_box(b"moov", &payload);
+
+        let (pos, header) = find_box_in_container(&data, 8, payload.len(), STBL).unwrap();
+
+        assert_eq!(pos, 8 + child_pos_in_payload);
+        assert_eq!(header.size, child.len() as u64);
+        assert!(find_box_in_container(&data, 8, payload.len(), MDIA).is_none());
+    }
+
+    #[test]
+    fn is_mp4_accepts_major_or_compatible_brands() {
+        assert!(is_mp4(&make_ftyp(b"M4A ", &[])));
+        assert!(is_mp4(&make_ftyp(b"zzzz", &[*b"isom"])));
+        assert!(!is_mp4(&make_ftyp(b"zzzz", &[*b"nope"])));
+        assert!(!is_mp4(b"not enough"));
+    }
+}
