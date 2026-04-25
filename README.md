@@ -31,9 +31,6 @@ m4againrs = { git = "https://github.com/andrewtheguy/m4againrs" }
 ```rust
 use std::path::Path;
 
-let louder = m4againrs::aac_apply_gain(&data, 2)?;          // +2 steps  (~+3.0 dB)
-let softer = m4againrs::aac_apply_gain(&data, -2)?;         // -2 steps  (~-3.0 dB)
-
 m4againrs::aac_apply_gain_file(
     Path::new("track.m4a"),
     Path::new("track_louder.m4a"),
@@ -82,9 +79,6 @@ Requires Python ≥ 3.9 (abi3 wheels).
 ```python
 import m4againrs
 
-with open("track.m4a", "rb") as f:
-    data = f.read()
-louder = m4againrs.aac_apply_gain(data, 2)
 m4againrs.aac_apply_gain_file("track.m4a", "track_louder.m4a", 2)
 m4againrs.GAIN_STEP_DB  # 1.5
 ```

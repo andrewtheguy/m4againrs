@@ -1,9 +1,8 @@
 //! AAC bitstream parser + in-place `global_gain` rewriter for M4A/MP4 files.
 //!
 //! Ported from mp3rgain `src/aac.rs` (MIT). Stripped of the public
-//! `AacAnalysis`, undo-tag plumbing, and the file-based entry points —
-//! the Python-facing API. The bytes path runs on `&[u8]` / `&mut [u8]`; the
-//! file path reads MP4 metadata and AAC samples incrementally.
+//! `AacAnalysis`, undo-tag plumbing, and in-place public entry points. The file
+//! path reads MP4 metadata and AAC samples incrementally.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -17,17 +16,6 @@ use crate::mp4;
 // ---------------------------------------------------------------------------
 // Public (crate-internal) entry points
 // ---------------------------------------------------------------------------
-
-/// Apply gain to an AAC/M4A byte buffer, in-place. Returns the number of
-/// `global_gain` locations that were actually modified.
-///
-/// Callers must pass a non-zero `gain_steps`; the public API enforces this.
-/// Locations whose current `global_gain` is 0 (silence) are skipped.
-/// Saturating clamp at 0..=255.
-pub(crate) fn apply_gain_to_bytes(data: &mut [u8], gain_steps: i32) -> Result<usize> {
-    let locations = analyze_locations(data)?;
-    Ok(apply_gain_to_data(data, &locations, gain_steps))
-}
 
 pub(crate) struct AacGainPlan {
     locations: Vec<AacGainLocation>,
@@ -55,53 +43,6 @@ pub(crate) fn apply_gain_plan_to_file(
     let modified = apply_gain_to_file_data(dst, &plan.locations, gain_steps)?;
     dst.flush()?;
     Ok(modified)
-}
-
-fn analyze_locations(data: &[u8]) -> Result<Vec<AacGainLocation>> {
-    if !mp4::is_mp4(data) {
-        return Err(Error::NotMp4);
-    }
-
-    let (sample_table, stsd_pos) = build_sample_table(data)?;
-    let sample_rate = parse_audio_config(data, stsd_pos)?;
-
-    let mut all_locations = Vec::with_capacity(sample_table.len().saturating_mul(2));
-    let mut parse_warnings = 0u32;
-
-    for entry in &sample_table {
-        let sample_start = entry.file_offset as usize;
-        let sample_end = sample_start + entry.size as usize;
-
-        if sample_end > data.len() {
-            parse_warnings += 1;
-            continue;
-        }
-
-        let sample_data = &data[sample_start..sample_end];
-        let mut reader = BitReader::new(sample_data);
-
-        let location_start = all_locations.len();
-        match parse_raw_data_block(
-            &mut reader,
-            sample_rate,
-            entry.file_offset,
-            &mut all_locations,
-        ) {
-            Ok(()) => {}
-            Err(_) => {
-                all_locations.truncate(location_start);
-                parse_warnings += 1;
-            }
-        }
-    }
-
-    if all_locations.is_empty() && parse_warnings > 0 {
-        return Err(Error::AacParseFailure {
-            warnings: parse_warnings,
-        });
-    }
-
-    Ok(all_locations)
 }
 
 fn analyze_locations_in_file(file: &mut File) -> Result<Vec<AacGainLocation>> {
@@ -1354,26 +1295,6 @@ fn parse_raw_data_block(
 // ---------------------------------------------------------------------------
 // Gain read / write
 // ---------------------------------------------------------------------------
-
-fn write_aac_gain_at(data: &mut [u8], loc: &AacGainLocation, value: u8) {
-    write_bits_u8(data, loc.file_offset as usize, loc.bit_offset, value)
-}
-
-fn apply_gain_to_data(data: &mut [u8], locations: &[AacGainLocation], gain_steps: i32) -> usize {
-    let mut modified = 0usize;
-    for loc in locations {
-        let current = loc.original_gain;
-        if current == 0 {
-            continue;
-        }
-        let new_value = adjust_gain_value(current, gain_steps);
-        if new_value != current {
-            write_aac_gain_at(data, loc, new_value);
-            modified += 1;
-        }
-    }
-    modified
-}
 
 fn apply_gain_to_file_data(
     file: &mut File,
