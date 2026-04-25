@@ -10,7 +10,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::OnceLock;
 
 use crate::aac_codebooks;
-use crate::bits::{adjust_gain_value, read_bits_u8, write_bits_u8};
+use crate::bits::{adjust_gain_value, write_bits_u8};
 use crate::error::{Error, Result};
 use crate::mp4;
 
@@ -65,10 +65,10 @@ fn analyze_locations(data: &[u8]) -> Result<Vec<AacGainLocation>> {
     let (sample_table, stsd_pos) = build_sample_table(data)?;
     let sample_rate = parse_audio_config(data, stsd_pos)?;
 
-    let mut all_locations = Vec::new();
+    let mut all_locations = Vec::with_capacity(sample_table.len().saturating_mul(2));
     let mut parse_warnings = 0u32;
 
-    for (idx, entry) in sample_table.iter().enumerate() {
+    for entry in &sample_table {
         let sample_start = entry.file_offset as usize;
         let sample_end = sample_start + entry.size as usize;
 
@@ -80,15 +80,16 @@ fn analyze_locations(data: &[u8]) -> Result<Vec<AacGainLocation>> {
         let sample_data = &data[sample_start..sample_end];
         let mut reader = BitReader::new(sample_data);
 
-        match parse_raw_data_block(&mut reader, sample_rate) {
-            Ok(locations) => {
-                for mut loc in locations {
-                    loc.sample_index = idx as u32;
-                    loc.file_offset = entry.file_offset + loc.sample_byte_offset as u64;
-                    all_locations.push(loc);
-                }
-            }
+        let location_start = all_locations.len();
+        match parse_raw_data_block(
+            &mut reader,
+            sample_rate,
+            entry.file_offset,
+            &mut all_locations,
+        ) {
+            Ok(()) => {}
             Err(_) => {
+                all_locations.truncate(location_start);
                 parse_warnings += 1;
             }
         }
@@ -113,11 +114,11 @@ fn analyze_locations_in_file(file: &mut File) -> Result<Vec<AacGainLocation>> {
     let sample_rate = parse_audio_config(&moov_data, stsd_pos)?;
     let file_len = file.seek(SeekFrom::End(0))?;
 
-    let mut all_locations = Vec::new();
+    let mut all_locations = Vec::with_capacity(sample_table.len().saturating_mul(2));
     let mut parse_warnings = 0u32;
     let mut sample_data = Vec::new();
 
-    for (idx, entry) in sample_table.iter().enumerate() {
+    for entry in &sample_table {
         let sample_end = match entry.file_offset.checked_add(entry.size as u64) {
             Some(end) => end,
             None => {
@@ -137,15 +138,16 @@ fn analyze_locations_in_file(file: &mut File) -> Result<Vec<AacGainLocation>> {
 
         let mut reader = BitReader::new(&sample_data);
 
-        match parse_raw_data_block(&mut reader, sample_rate) {
-            Ok(locations) => {
-                for mut loc in locations {
-                    loc.sample_index = idx as u32;
-                    loc.file_offset = entry.file_offset + loc.sample_byte_offset as u64;
-                    all_locations.push(loc);
-                }
-            }
+        let location_start = all_locations.len();
+        match parse_raw_data_block(
+            &mut reader,
+            sample_rate,
+            entry.file_offset,
+            &mut all_locations,
+        ) {
+            Ok(()) => {}
             Err(_) => {
+                all_locations.truncate(location_start);
                 parse_warnings += 1;
             }
         }
@@ -240,30 +242,16 @@ fn effective_box_size(header: &mp4::BoxHeader, pos: u64, file_len: u64) -> Resul
 
 #[derive(Debug, Clone)]
 struct AacGainLocation {
-    sample_index: u32,
     file_offset: u64,
-    sample_byte_offset: u32,
     bit_offset: u8,
-    #[allow(dead_code)]
-    channel: u8,
     original_gain: u8,
 }
 
 impl AacGainLocation {
-    fn new(
-        sample_index: u32,
-        file_offset: u64,
-        sample_byte_offset: u32,
-        bit_offset: u8,
-        channel: u8,
-        original_gain: u8,
-    ) -> Self {
+    fn new(file_offset: u64, bit_offset: u8, original_gain: u8) -> Self {
         Self {
-            sample_index,
             file_offset,
-            sample_byte_offset,
             bit_offset,
-            channel,
             original_gain,
         }
     }
@@ -596,27 +584,28 @@ fn build_sample_table(data: &[u8]) -> Result<(Vec<SampleEntry>, usize)> {
             samples_per_chunk: read_u32_be(data, off + 4),
         });
     }
+    if stsc_entries.is_empty() {
+        return Err(Error::AacParse {
+            message: "empty stsc box".into(),
+        });
+    }
 
     // STCO / CO64
     let chunk_offsets = parse_chunk_offsets(data, stbl_start, stbl_size)?;
 
     let mut entries = Vec::with_capacity(sample_count);
     let mut sample_idx = 0usize;
+    let mut stsc_idx = 0usize;
 
     for (chunk_idx, &chunk_offset) in chunk_offsets.iter().enumerate() {
-        let chunk_num = chunk_idx + 1;
+        let chunk_num = chunk_idx as u32 + 1;
 
-        let samples_in_chunk = {
-            let mut spc = stsc_entries[0].samples_per_chunk;
-            for entry in &stsc_entries {
-                if entry.first_chunk as usize <= chunk_num {
-                    spc = entry.samples_per_chunk;
-                } else {
-                    break;
-                }
-            }
-            spc as usize
-        };
+        while stsc_idx + 1 < stsc_entries.len()
+            && stsc_entries[stsc_idx + 1].first_chunk <= chunk_num
+        {
+            stsc_idx += 1;
+        }
+        let samples_in_chunk = stsc_entries[stsc_idx].samples_per_chunk as usize;
 
         let mut offset_in_chunk = 0u64;
         for _ in 0..samples_in_chunk {
@@ -1118,15 +1107,19 @@ fn parse_tns_data(reader: &mut BitReader, info: &IcsInfo) -> Result<()> {
 
 fn parse_ics(
     reader: &mut BitReader,
-    channel: u8,
     common_window: bool,
     shared_info: Option<&IcsInfo>,
     sample_rate: u32,
+    sample_file_offset: u64,
 ) -> Result<(AacGainLocation, IcsInfo)> {
     let (byte_off, bit_off) = reader.position();
     let global_gain = reader.read_bits(8)? as u8;
 
-    let gain_loc = AacGainLocation::new(0, 0, byte_off as u32, bit_off, channel, global_gain);
+    let gain_loc = AacGainLocation::new(
+        sample_file_offset + byte_off as u64,
+        bit_off,
+        global_gain,
+    );
 
     let info = if common_window {
         shared_info.unwrap().clone()
@@ -1178,13 +1171,30 @@ fn parse_ics(
     Ok((gain_loc, info))
 }
 
-fn parse_sce(reader: &mut BitReader, sample_rate: u32) -> Result<Vec<AacGainLocation>> {
+fn parse_sce(
+    reader: &mut BitReader,
+    sample_rate: u32,
+    sample_file_offset: u64,
+    locations: &mut Vec<AacGainLocation>,
+) -> Result<()> {
     let _tag = reader.read_bits(4)?;
-    let (loc, _) = parse_ics(reader, 0, false, None, sample_rate)?;
-    Ok(vec![loc])
+    let (loc, _) = parse_ics(
+        reader,
+        false,
+        None,
+        sample_rate,
+        sample_file_offset,
+    )?;
+    locations.push(loc);
+    Ok(())
 }
 
-fn parse_cpe(reader: &mut BitReader, sample_rate: u32) -> Result<Vec<AacGainLocation>> {
+fn parse_cpe(
+    reader: &mut BitReader,
+    sample_rate: u32,
+    sample_file_offset: u64,
+    locations: &mut Vec<AacGainLocation>,
+) -> Result<()> {
     let _tag = reader.read_bits(4)?;
     let common_window = reader.read_bit()?;
 
@@ -1203,10 +1213,24 @@ fn parse_cpe(reader: &mut BitReader, sample_rate: u32) -> Result<Vec<AacGainLoca
         None
     };
 
-    let (loc1, _) = parse_ics(reader, 0, common_window, shared_info.as_ref(), sample_rate)?;
-    let (loc2, _) = parse_ics(reader, 1, common_window, shared_info.as_ref(), sample_rate)?;
+    let (loc1, _) = parse_ics(
+        reader,
+        common_window,
+        shared_info.as_ref(),
+        sample_rate,
+        sample_file_offset,
+    )?;
+    let (loc2, _) = parse_ics(
+        reader,
+        common_window,
+        shared_info.as_ref(),
+        sample_rate,
+        sample_file_offset,
+    )?;
 
-    Ok(vec![loc1, loc2])
+    locations.push(loc1);
+    locations.push(loc2);
+    Ok(())
 }
 
 fn skip_dse(reader: &mut BitReader) -> Result<()> {
@@ -1278,9 +1302,12 @@ fn skip_pce(reader: &mut BitReader) -> Result<()> {
     Ok(())
 }
 
-fn parse_raw_data_block(reader: &mut BitReader, sample_rate: u32) -> Result<Vec<AacGainLocation>> {
-    let mut locations = Vec::new();
-
+fn parse_raw_data_block(
+    reader: &mut BitReader,
+    sample_rate: u32,
+    sample_file_offset: u64,
+    locations: &mut Vec<AacGainLocation>,
+) -> Result<()> {
     loop {
         if reader.bits_remaining() < 3 {
             break;
@@ -1289,12 +1316,20 @@ fn parse_raw_data_block(reader: &mut BitReader, sample_rate: u32) -> Result<Vec<
 
         match id {
             ID_SCE | ID_LFE => {
-                let locs = parse_sce(reader, sample_rate)?;
-                locations.extend(locs);
+                parse_sce(
+                    reader,
+                    sample_rate,
+                    sample_file_offset,
+                    locations,
+                )?;
             }
             ID_CPE => {
-                let locs = parse_cpe(reader, sample_rate)?;
-                locations.extend(locs);
+                parse_cpe(
+                    reader,
+                    sample_rate,
+                    sample_file_offset,
+                    locations,
+                )?;
             }
             ID_CCE => {
                 return Err(Error::AacParse {
@@ -1313,16 +1348,12 @@ fn parse_raw_data_block(reader: &mut BitReader, sample_rate: u32) -> Result<Vec<
         }
     }
 
-    Ok(locations)
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // Gain read / write
 // ---------------------------------------------------------------------------
-
-fn read_aac_gain_at(data: &[u8], loc: &AacGainLocation) -> u8 {
-    read_bits_u8(data, loc.file_offset as usize, loc.bit_offset)
-}
 
 fn write_aac_gain_at(data: &mut [u8], loc: &AacGainLocation, value: u8) {
     write_bits_u8(data, loc.file_offset as usize, loc.bit_offset, value)
@@ -1331,7 +1362,7 @@ fn write_aac_gain_at(data: &mut [u8], loc: &AacGainLocation, value: u8) {
 fn apply_gain_to_data(data: &mut [u8], locations: &[AacGainLocation], gain_steps: i32) -> usize {
     let mut modified = 0usize;
     for loc in locations {
-        let current = read_aac_gain_at(data, loc);
+        let current = loc.original_gain;
         if current == 0 {
             continue;
         }

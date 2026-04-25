@@ -1,23 +1,6 @@
-//! Bit-level read/write helpers at arbitrary byte+bit offsets.
+//! Bit-level write helpers at arbitrary byte+bit offsets.
 //!
 //! Ported from mp3rgain `src/frame.rs` (MIT).
-
-/// Read an 8-bit value at a bit-unaligned position (raw byte + bit offset).
-pub(crate) fn read_bits_u8(data: &[u8], byte_offset: usize, bit_offset: u8) -> u8 {
-    if byte_offset >= data.len() {
-        return 0;
-    }
-
-    if bit_offset == 0 {
-        data[byte_offset]
-    } else if byte_offset + 1 < data.len() {
-        let high = data[byte_offset] << bit_offset;
-        let low = data[byte_offset + 1] >> (8 - bit_offset);
-        high | low
-    } else {
-        data[byte_offset] << bit_offset
-    }
-}
 
 /// Write an 8-bit value at a bit-unaligned position (raw byte + bit offset).
 pub(crate) fn write_bits_u8(data: &mut [u8], byte_offset: usize, bit_offset: u8, value: u8) {
