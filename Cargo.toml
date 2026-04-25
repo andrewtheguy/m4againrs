@@ -2,11 +2,11 @@
 members = ["cli", "python"]
 
 [workspace.package]
-version = "0.0.0"
+version = "0.0.7"
 
 [package]
 name = "m4againrs"
-version = "0.0.0"
+version.workspace = true
 edition = "2021"
 
 [lib]
