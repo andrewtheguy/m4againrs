@@ -15,6 +15,3 @@ mod mp4;
 
 pub use error::{Error, Result};
 pub use gain::{aac_apply_gain, aac_apply_gain_file};
-
-#[cfg(feature = "python")]
-mod python;
