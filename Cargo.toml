@@ -1,10 +1,10 @@
 [package]
-name = "m4againpy"
+name = "m4againrs"
 version = "0.0.0"
 edition = "2021"
 
 [lib]
-name = "m4againpy"
+name = "m4againrs"
 crate-type = ["rlib", "cdylib"]
 
 [features]
