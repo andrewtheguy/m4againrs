@@ -1,6 +1,9 @@
 [workspace]
 members = ["cli", "python"]
 
+[workspace.package]
+version = "0.0.0"
+
 [package]
 name = "m4againrs"
 version = "0.0.0"
