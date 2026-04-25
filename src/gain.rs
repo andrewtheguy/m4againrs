@@ -5,20 +5,6 @@ use crate::aac;
 use crate::error::{Error, Result};
 use crate::mp4;
 
-/// Apply a static `gain_steps` (1 step ≈ 1.5 dB) to AAC/M4A bytes.
-///
-/// Kept private to the Rust crate; the public and Python surfaces use the
-/// streaming file API to avoid unnecessary full-file copies.
-#[allow(dead_code)]
-pub(crate) fn aac_apply_gain(data: &[u8], gain_steps: i32) -> Result<Vec<u8>> {
-    if gain_steps == 0 {
-        return Err(Error::ZeroGainSteps);
-    }
-    let mut out = data.to_vec();
-    aac::apply_gain_to_bytes(&mut out, gain_steps)?;
-    Ok(out)
-}
-
 /// Stream AAC/M4A from `src`, apply a static `gain_steps`, and write the
 /// modified bytes to `dst`. Returns the number of `global_gain` locations
 /// actually modified.
@@ -81,22 +67,4 @@ fn same_file_metadata(a: &fs::Metadata, b: &fs::Metadata) -> bool {
 #[cfg(not(unix))]
 fn same_file_metadata(_a: &fs::Metadata, _b: &fs::Metadata) -> bool {
     false
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn private_bytes_api_rejects_zero_gain_without_copying() {
-        assert!(matches!(
-            aac_apply_gain(b"not an mp4", 0),
-            Err(Error::ZeroGainSteps)
-        ));
-    }
-
-    #[test]
-    fn private_bytes_api_rejects_non_mp4_input() {
-        assert!(matches!(aac_apply_gain(b"not an mp4", 2), Err(Error::NotMp4)));
-    }
 }
