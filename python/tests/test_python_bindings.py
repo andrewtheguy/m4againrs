@@ -272,6 +272,9 @@ def _load_module():
 
 
 m4againrs = _load_module()
+SKIP_BYTES_API_REMOVED = unittest.skip(
+    "bytes API removed; keep test visible for future file-backed coverage"
+)
 
 
 class M4aGainRsTest(unittest.TestCase):
@@ -280,36 +283,43 @@ class M4aGainRsTest(unittest.TestCase):
 
     # -- bytes API --
 
+    @SKIP_BYTES_API_REMOVED
     def test_bytes_zero_raises(self):
         data = TEST_M4A.read_bytes()
         with self.assertRaises(RuntimeError):
             m4againrs.aac_apply_gain(data, 0)
 
+    @SKIP_BYTES_API_REMOVED
     def test_bytes_preserves_length(self):
         data = TEST_M4A.read_bytes()
         out = m4againrs.aac_apply_gain(data, 2)
         self.assertEqual(len(out), len(data))
 
+    @SKIP_BYTES_API_REMOVED
     def test_bytes_positive_mutates(self):
         data = TEST_M4A.read_bytes()
         out = m4againrs.aac_apply_gain(data, 2)
         self.assertNotEqual(out, data)
 
+    @SKIP_BYTES_API_REMOVED
     def test_bytes_negative_mutates(self):
         data = TEST_M4A.read_bytes()
         out = m4againrs.aac_apply_gain(data, -2)
         self.assertNotEqual(out, data)
 
+    @SKIP_BYTES_API_REMOVED
     def test_bytes_inverse_round_trip(self):
         data = TEST_M4A.read_bytes()
         up = m4againrs.aac_apply_gain(data, 2)
         back = m4againrs.aac_apply_gain(up, -2)
         self.assertEqual(back, data)
 
+    @SKIP_BYTES_API_REMOVED
     def test_bytes_not_m4a_raises(self):
         with self.assertRaises(RuntimeError):
             m4againrs.aac_apply_gain(b"\x00" * 128, 2)
 
+    @SKIP_BYTES_API_REMOVED
     def test_bytes_returns_bytes_type(self):
         data = TEST_M4A.read_bytes()
         self.assertIsInstance(m4againrs.aac_apply_gain(data, 2), bytes)
@@ -433,11 +443,13 @@ class MetadataPreservationTest(unittest.TestCase):
     other byte in the MP4 container (ftyp, moov, stbl headers, udta, meta,
     ilst iTunes tags, chapter atoms, anything else) survives byte-for-byte."""
 
+    @SKIP_BYTES_API_REMOVED
     def test_file_length_preserved(self):
         data = TEST_M4A.read_bytes()
         for steps in (-5, -2, -1, 1, 2, 5):
             self.assertEqual(len(m4againrs.aac_apply_gain(data, steps)), len(data))
 
+    @SKIP_BYTES_API_REMOVED
     def test_container_bytes_outside_samples_unchanged_bytes_api(self):
         """Zero out all AAC-sample bytes, then the rest must match exactly."""
         data = TEST_M4A.read_bytes()
@@ -555,6 +567,7 @@ class MetadataPreservationTest(unittest.TestCase):
                 self.assertEqual(after_size, before_size)
                 self.assertEqual(after_off, before_off + moov_growth)
 
+    @SKIP_BYTES_API_REMOVED
     def test_sample_byte_ranges_unchanged(self):
         """stsz/stsc/stco values (sample sizes + chunk offsets) must not move."""
         data = TEST_M4A.read_bytes()
@@ -563,6 +576,7 @@ class MetadataPreservationTest(unittest.TestCase):
             out = m4againrs.aac_apply_gain(data, steps)
             self.assertEqual(_sample_byte_ranges(out), original_ranges)
 
+    @SKIP_BYTES_API_REMOVED
     def test_itunes_ilst_tag_preserved(self):
         """testdata/test.m4a ships with a `moov/udta/meta/ilst/©too` tag;
         its exact bytes must survive gain adjustment."""
@@ -576,6 +590,7 @@ class MetadataPreservationTest(unittest.TestCase):
             out = m4againrs.aac_apply_gain(data, steps)
             self.assertEqual(_find_ilst_blob(out), original_ilst)
 
+    @SKIP_BYTES_API_REMOVED
     def test_ftyp_preserved(self):
         """The first ftyp box (brand + compat list) must be untouched."""
         data = TEST_M4A.read_bytes()
@@ -669,6 +684,7 @@ class TaggedFixtureTest(unittest.TestCase):
         self.assertIn(b"\xa9too", tags)
         self.assertIn(b"trkn", tags)
 
+    @SKIP_BYTES_API_REMOVED
     def test_tags_preserved_after_gain(self):
         data = TAGGED_M4A.read_bytes()
         before = _parse_itunes_tags(data)
@@ -677,6 +693,7 @@ class TaggedFixtureTest(unittest.TestCase):
             after = _parse_itunes_tags(out)
             self.assertEqual(before, after, f"tags changed at gain_steps={steps}")
 
+    @SKIP_BYTES_API_REMOVED
     def test_container_bytes_outside_samples_unchanged(self):
         """Byte-exact structural preservation on the rich-metadata fixture."""
         data = TAGGED_M4A.read_bytes()
@@ -685,6 +702,7 @@ class TaggedFixtureTest(unittest.TestCase):
             out = m4againrs.aac_apply_gain(data, steps)
             self.assertEqual(_redact_sample_bytes(out), redacted_original)
 
+    @SKIP_BYTES_API_REMOVED
     def test_ilst_blob_identical_after_gain(self):
         data = TAGGED_M4A.read_bytes()
         original_ilst = _find_ilst_blob(data)
@@ -712,6 +730,7 @@ class TaggedFixtureTest(unittest.TestCase):
             expected[b"M4AG"] = b"m4againrs version=1 gain_steps=4 gain_step_db=1.5"
             self.assertEqual(expected, after)
 
+    @SKIP_BYTES_API_REMOVED
     def test_gain_actually_applied_on_fixture(self):
         """Sanity: ensure the fixture has non-silent samples so the gain test
         isn't trivially passing on all-zeroed gain locations."""
