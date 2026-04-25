@@ -4,8 +4,8 @@
 //! `AacAnalysis`, undo-tag plumbing, and in-place public entry points. The file
 //! path reads MP4 metadata and AAC samples incrementally.
 
-use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::ops::Range;
 use std::sync::OnceLock;
 
 use crate::aac_codebooks;
@@ -21,31 +21,68 @@ pub(crate) struct AacGainPlan {
     locations: Vec<AacGainLocation>,
 }
 
-pub(crate) fn analyze_file(src: &mut File) -> Result<AacGainPlan> {
+pub(crate) fn analyze_file<R: Read + Seek>(src: &mut R) -> Result<AacGainPlan> {
     Ok(AacGainPlan {
         locations: analyze_locations_in_file(src)?,
     })
 }
 
-/// Apply gain to a source file while keeping memory bounded by metadata and
-/// one patch chunk. The source is copied to `dst`, then only chunks containing
-/// located `global_gain` bits are patched in `dst`.
-pub(crate) fn apply_gain_plan_to_file(
-    src: &mut File,
-    dst: &mut File,
+/// Apply gain while streaming modified MP4 bytes to a forward-only writer.
+///
+/// The source must be seekable because analysis and patch planning read MP4
+/// metadata before the output pass. The destination is only written forward.
+pub(crate) fn apply_gain_plan_to_writer<R: Read + Seek, W: Write>(
+    src: &mut R,
+    dst: &mut W,
     plan: &AacGainPlan,
+    moov_rewrite: &mp4::MoovRewrite,
     gain_steps: i32,
 ) -> Result<usize> {
-    src.seek(SeekFrom::Start(0))?;
-    dst.seek(SeekFrom::Start(0))?;
-    std::io::copy(src, dst)?;
+    assert!(plan
+        .locations
+        .windows(2)
+        .all(|pair| pair[0].file_offset <= pair[1].file_offset));
 
-    let modified = apply_gain_to_file_data(dst, &plan.locations, gain_steps)?;
+    let file_len = src.seek(SeekFrom::End(0))?;
+    let old_moov_end = moov_rewrite
+        .offset
+        .checked_add(moov_rewrite.old_size)
+        .ok_or_else(|| Error::AacParse {
+            message: "moov box range overflow".into(),
+        })?;
+    if old_moov_end > file_len {
+        return Err(Error::AacParse {
+            message: "moov box extends past end of file".into(),
+        });
+    }
+
+    let mut patch_state = PatchState {
+        location_idx: 0,
+        modified: 0,
+    };
+
+    copy_patched_range(
+        src,
+        dst,
+        &plan.locations,
+        &mut patch_state,
+        0..moov_rewrite.offset,
+        gain_steps,
+    )?;
+    dst.write_all(&moov_rewrite.data)?;
+    copy_patched_range(
+        src,
+        dst,
+        &plan.locations,
+        &mut patch_state,
+        old_moov_end..file_len,
+        gain_steps,
+    )?;
     dst.flush()?;
-    Ok(modified)
+    Ok(patch_state.modified)
 }
 
-fn analyze_locations_in_file(file: &mut File) -> Result<Vec<AacGainLocation>> {
+fn analyze_locations_in_file<R: Read + Seek>(file: &mut R) -> Result<Vec<AacGainLocation>> {
     if !is_mp4_file(file)? {
         return Err(Error::NotMp4);
     }
@@ -103,7 +140,7 @@ fn analyze_locations_in_file(file: &mut File) -> Result<Vec<AacGainLocation>> {
     Ok(all_locations)
 }
 
-fn is_mp4_file(file: &mut File) -> Result<bool> {
+fn is_mp4_file<R: Read + Seek>(file: &mut R) -> Result<bool> {
     file.seek(SeekFrom::Start(0))?;
 
     let mut prefix = Vec::with_capacity(128);
@@ -116,7 +153,7 @@ fn is_mp4_file(file: &mut File) -> Result<bool> {
     Ok(mp4::is_mp4(&prefix))
 }
 
-fn read_top_level_box(file: &mut File, box_type: u32) -> Result<Option<Vec<u8>>> {
+fn read_top_level_box<R: Read + Seek>(file: &mut R, box_type: u32) -> Result<Option<Vec<u8>>> {
     let file_len = file.seek(SeekFrom::End(0))?;
     file.seek(SeekFrom::Start(0))?;
 
@@ -1056,11 +1093,7 @@ fn parse_ics(
     let (byte_off, bit_off) = reader.position();
     let global_gain = reader.read_bits(8)? as u8;
 
-    let gain_loc = AacGainLocation::new(
-        sample_file_offset + byte_off as u64,
-        bit_off,
-        global_gain,
-    );
+    let gain_loc = AacGainLocation::new(sample_file_offset + byte_off as u64, bit_off, global_gain);
 
     let info = if common_window {
         shared_info.unwrap().clone()
@@ -1119,13 +1152,7 @@ fn parse_sce(
     locations: &mut Vec<AacGainLocation>,
 ) -> Result<()> {
     let _tag = reader.read_bits(4)?;
-    let (loc, _) = parse_ics(
-        reader,
-        false,
-        None,
-        sample_rate,
-        sample_file_offset,
-    )?;
+    let (loc, _) = parse_ics(reader, false, None, sample_rate, sample_file_offset)?;
     locations.push(loc);
     Ok(())
 }
@@ -1257,20 +1284,10 @@ fn parse_raw_data_block(
 
         match id {
             ID_SCE | ID_LFE => {
-                parse_sce(
-                    reader,
-                    sample_rate,
-                    sample_file_offset,
-                    locations,
-                )?;
+                parse_sce(reader, sample_rate, sample_file_offset, locations)?;
             }
             ID_CPE => {
-                parse_cpe(
-                    reader,
-                    sample_rate,
-                    sample_file_offset,
-                    locations,
-                )?;
+                parse_cpe(reader, sample_rate, sample_file_offset, locations)?;
             }
             ID_CCE => {
                 return Err(Error::AacParse {
@@ -1296,44 +1313,66 @@ fn parse_raw_data_block(
 // Gain read / write
 // ---------------------------------------------------------------------------
 
-fn apply_gain_to_file_data(
-    file: &mut File,
+struct PatchState {
+    location_idx: usize,
+    modified: usize,
+}
+
+fn copy_patched_range<R: Read + Seek, W: Write>(
+    src: &mut R,
+    dst: &mut W,
     locations: &[AacGainLocation],
+    state: &mut PatchState,
+    range: Range<u64>,
     gain_steps: i32,
-) -> Result<usize> {
+) -> Result<()> {
     const PATCH_CHUNK_SIZE: u64 = 1024 * 1024;
 
-    // The chunking loop assumes sorted locations: idx selects chunk_start,
-    // PATCH_CHUNK_SIZE only extends forward, and write_bits_u8 uses
-    // loc.file_offset - chunk_start after adjust_gain_value decides to patch.
-    assert!(locations
-        .windows(2)
-        .all(|pair| pair[0].file_offset <= pair[1].file_offset));
+    let start = range.start;
+    let end = range.end;
+    if start >= end {
+        return Ok(());
+    }
 
-    let mut modified = 0usize;
-    let mut idx = 0usize;
+    while state.location_idx < locations.len() && locations[state.location_idx].file_offset < start
+    {
+        state.location_idx += 1;
+    }
+
+    let mut cursor = start;
     let mut buf = Vec::new();
 
-    while idx < locations.len() {
-        let Some(first_idx) = locations[idx..].iter().position(|loc| {
-            loc.original_gain != 0
+    loop {
+        let Some(first_offset) = locations[state.location_idx..].iter().position(|loc| {
+            loc.file_offset >= cursor
+                && loc.file_offset < end
+                && loc.original_gain != 0
                 && adjust_gain_value(loc.original_gain, gain_steps) != loc.original_gain
         }) else {
+            copy_plain_range(src, dst, cursor, end)?;
             break;
         };
-        idx += first_idx;
+        let first_idx = state.location_idx + first_offset;
+        let chunk_start = locations[first_idx].file_offset;
+        copy_plain_range(src, dst, cursor, chunk_start)?;
 
-        let chunk_start = locations[idx].file_offset;
-        let chunk_limit = chunk_start.saturating_add(PATCH_CHUNK_SIZE);
+        let chunk_limit = chunk_start.saturating_add(PATCH_CHUNK_SIZE).min(end);
         let mut chunk_end = chunk_start;
-        let mut end_idx = idx;
+        let mut end_idx = first_idx;
 
         while end_idx < locations.len() {
             let loc = &locations[end_idx];
+            if loc.file_offset >= end {
+                break;
+            }
+
             let new_value = adjust_gain_value(loc.original_gain, gain_steps);
             let will_modify = loc.original_gain != 0 && new_value != loc.original_gain;
             let loc_len = if loc.bit_offset == 0 { 1 } else { 2 };
             let loc_end = loc.file_offset + loc_len;
+            if loc_end > end {
+                break;
+            }
 
             if loc_end > chunk_limit && chunk_end > chunk_start {
                 break;
@@ -1344,12 +1383,17 @@ fn apply_gain_to_file_data(
             }
             end_idx += 1;
         }
+        if chunk_end == chunk_start {
+            return Err(Error::AacParse {
+                message: "gain location crosses rewritten MP4 box boundary".into(),
+            });
+        }
 
         buf.resize((chunk_end - chunk_start) as usize, 0);
-        file.seek(SeekFrom::Start(chunk_start))?;
-        file.read_exact(&mut buf)?;
+        src.seek(SeekFrom::Start(chunk_start))?;
+        src.read_exact(&mut buf)?;
 
-        for loc in &locations[idx..end_idx] {
+        for loc in &locations[first_idx..end_idx] {
             if loc.original_gain == 0 {
                 continue;
             }
@@ -1361,13 +1405,43 @@ fn apply_gain_to_file_data(
 
             let offset = (loc.file_offset - chunk_start) as usize;
             write_bits_u8(&mut buf[offset..], 0, loc.bit_offset, new_value);
-            modified += 1;
+            state.modified += 1;
         }
 
-        file.seek(SeekFrom::Start(chunk_start))?;
-        file.write_all(&buf)?;
-        idx = end_idx;
+        dst.write_all(&buf)?;
+        cursor = chunk_end;
+        state.location_idx = end_idx;
     }
 
-    Ok(modified)
+    Ok(())
+}
+
+fn copy_plain_range<R: Read + Seek, W: Write>(
+    src: &mut R,
+    dst: &mut W,
+    start: u64,
+    end: u64,
+) -> Result<()> {
+    const COPY_CHUNK_SIZE: usize = 1024 * 1024;
+
+    if start >= end {
+        return Ok(());
+    }
+
+    src.seek(SeekFrom::Start(start))?;
+    let mut remaining = end - start;
+    let mut buf = vec![0u8; COPY_CHUNK_SIZE];
+
+    while remaining > 0 {
+        let len = usize::try_from(remaining.min(COPY_CHUNK_SIZE as u64)).map_err(|_| {
+            Error::AacParse {
+                message: "copy chunk too large".into(),
+            }
+        })?;
+        src.read_exact(&mut buf[..len])?;
+        dst.write_all(&buf[..len])?;
+        remaining -= len as u64;
+    }
+
+    Ok(())
 }

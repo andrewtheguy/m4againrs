@@ -8,7 +8,8 @@ metadata.
 The library finds AAC `global_gain` fields in the bitstream and adds or
 subtracts the requested number of native AAC gain steps. Unlike the original
 implementation, the file API streams source audio to a separate destination
-file instead of modifying the input in place; it patches only the gain bits and
+file instead of modifying the input in place; the output is written forward and
+does not need to be seekable. It patches only the gain bits and
 records the applied step in a custom MP4 metadata tag.
 
 ## Workspace layout
@@ -38,6 +39,16 @@ m4againrs::aac_apply_gain_file(
 )?;
 ```
 
+For non-file outputs, pass a seekable input and any `std::io::Write` output:
+
+```rust
+use std::fs::File;
+
+let mut input = File::open("track.m4a")?;
+let mut output = Vec::new();
+m4againrs::aac_apply_gain_to_writer(&mut input, &mut output, 2)?;
+```
+
 `gain_steps == 0` returns an `Error`, as does passing the same source and
 destination path. `m4againrs::GAIN_STEP_DB` exposes the AAC step size (1.5 dB).
 
@@ -47,12 +58,13 @@ Build and use the standalone binary:
 
 ```bash
 cargo build --release -p m4againrs-cli
-./target/release/m4againrs <input.m4a> <output.m4a> <gain_steps>
+./target/release/m4againrs <input.m4a> <output.m4a|-> <gain_steps>
 ```
 
 Three positional arguments — input path, output path, signed integer step
 count. One step is 1.5 dB. The source file is never overwritten, and a
-custom `M4AG` MP4 metadata tag is written to the destination.
+custom `M4AG` MP4 metadata tag is written to the destination. Use `-` as the
+output path to stream the modified M4A to stdout.
 
 ```bash
 m4againrs track.m4a track_louder.m4a 2     # +3.0 dB

@@ -108,7 +108,10 @@ fn file_api_preserves_ftyp_and_sample_sizes() {
     m4againrs::aac_apply_gain_file(&src, &dst, 3).expect("gain application should succeed");
 
     let dst_bytes = fs::read(&dst).expect("failed to read output fixture");
-    assert_eq!(top_level_box_bytes(&dst_bytes, b"ftyp"), src_ftyp.as_slice());
+    assert_eq!(
+        top_level_box_bytes(&dst_bytes, b"ftyp"),
+        src_ftyp.as_slice()
+    );
     assert_same_sample_sizes(&src_ranges, &sample_byte_ranges(&dst_bytes));
 }
 
@@ -127,12 +130,39 @@ fn file_api_preserves_existing_tags_and_adds_gain_tag() {
         b"m4againrs version=1 gain_steps=4 gain_step_db=1.5".to_vec(),
     );
 
-    let modified = m4againrs::aac_apply_gain_file(&src, &dst, 4)
-        .expect("gain application should succeed");
+    let modified =
+        m4againrs::aac_apply_gain_file(&src, &dst, 4).expect("gain application should succeed");
 
     assert!(modified > 0);
     assert_eq!(fs::read(&src).expect("failed to reread source"), src_bytes);
-    assert_eq!(parse_itunes_tags(&fs::read(&dst).expect("failed to read output")), expected_tags);
+    assert_eq!(
+        parse_itunes_tags(&fs::read(&dst).expect("failed to read output")),
+        expected_tags
+    );
+}
+
+#[test]
+fn writer_api_accepts_forward_only_output() {
+    let fixture = testdata_path("test.m4a");
+    let src_bytes = fs::read(&fixture).expect("failed to read fixture");
+    let src_ranges = sample_byte_ranges(&src_bytes);
+    let mut src = fs::File::open(&fixture).expect("failed to open fixture");
+    let mut dst = Vec::new();
+
+    let modified = m4againrs::aac_apply_gain_to_writer(&mut src, &mut dst, 2)
+        .expect("writer API should accept non-seekable output");
+
+    assert!(modified > 0);
+    let dst_ranges = sample_byte_ranges(&dst);
+    assert_same_sample_sizes(&src_ranges, &dst_ranges);
+    assert!(
+        sample_payloads_differ(&src_bytes, &dst, &src_ranges, &dst_ranges),
+        "no AAC sample bytes changed"
+    );
+    assert_eq!(
+        parse_itunes_tags(&dst).get(b"M4AG".as_slice()),
+        Some(&b"m4againrs version=1 gain_steps=2 gain_step_db=1.5".to_vec())
+    );
 }
 
 fn copy_fixture(src: &Path, dst: &Path) {
@@ -235,23 +265,21 @@ fn sample_byte_ranges(buf: &[u8]) -> Vec<(usize, usize)> {
 
     let stsz_content = stsz.offset + stsz.header_size;
     let default_size = read_u32_be(buf, stsz_content + 4).expect("stsz missing default size");
-    let sample_count = read_u32_be(buf, stsz_content + 8).expect("stsz missing sample count")
-        as usize;
+    let sample_count =
+        read_u32_be(buf, stsz_content + 8).expect("stsz missing sample count") as usize;
     let sample_sizes = if default_size != 0 {
         vec![default_size as usize; sample_count]
     } else {
         let sizes_start = stsz_content + 12;
         (0..sample_count)
             .map(|idx| {
-                read_u32_be(buf, sizes_start + idx * 4)
-                    .expect("stsz sample size missing") as usize
+                read_u32_be(buf, sizes_start + idx * 4).expect("stsz sample size missing") as usize
             })
             .collect()
     };
 
     let stsc_content = stsc.offset + stsc.header_size;
-    let stsc_count =
-        read_u32_be(buf, stsc_content + 4).expect("stsc missing entry count") as usize;
+    let stsc_count = read_u32_be(buf, stsc_content + 4).expect("stsc missing entry count") as usize;
     let mut stsc_entries = Vec::with_capacity(stsc_count);
     for idx in 0..stsc_count {
         let off = stsc_content + 8 + idx * 12;
@@ -267,8 +295,8 @@ fn sample_byte_ranges(buf: &[u8]) -> Vec<(usize, usize)> {
             read_u32_be(buf, chunk_content + 4).expect("stco missing chunk count") as usize;
         (0..chunk_count)
             .map(|idx| {
-                read_u32_be(buf, chunk_content + 8 + idx * 4)
-                    .expect("stco chunk offset missing") as usize
+                read_u32_be(buf, chunk_content + 8 + idx * 4).expect("stco chunk offset missing")
+                    as usize
             })
             .collect()
     } else {

@@ -1,4 +1,5 @@
 use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Seek, Write};
 use std::path::Path;
 
 use crate::aac;
@@ -19,19 +20,57 @@ pub fn aac_apply_gain_file(src: &Path, dst: &Path, gain_steps: i32) -> Result<us
     ensure_distinct_paths(src, dst)?;
 
     let mut src_file = File::open(src)?;
-    let gain_plan = aac::analyze_file(&mut src_file)?;
+    let (gain_plan, moov_rewrite) = prepare_gain(&mut src_file, gain_steps)?;
+    let mut dst_file = open_output_stream(dst)?;
 
-    let mut dst_file = OpenOptions::new()
-        .read(true)
+    aac::apply_gain_plan_to_writer(
+        &mut src_file,
+        &mut dst_file,
+        &gain_plan,
+        &moov_rewrite,
+        gain_steps,
+    )
+}
+
+/// Apply a static `gain_steps` (1 step ~= 1.5 dB) from a seekable AAC/M4A
+/// source to a forward-only output stream.
+///
+/// The input must be seekable so MP4 metadata and AAC sample locations can be
+/// planned before writing. The output only needs [`Write`].
+pub fn aac_apply_gain_to_writer<R: Read + Seek, W: Write>(
+    src: &mut R,
+    dst: &mut W,
+    gain_steps: i32,
+) -> Result<usize> {
+    let (gain_plan, moov_rewrite) = prepare_gain(src, gain_steps)?;
+    aac::apply_gain_plan_to_writer(src, dst, &gain_plan, &moov_rewrite, gain_steps)
+}
+
+fn prepare_gain<R: Read + Seek>(
+    src: &mut R,
+    gain_steps: i32,
+) -> Result<(aac::AacGainPlan, mp4::MoovRewrite)> {
+    if gain_steps == 0 {
+        return Err(Error::ZeroGainSteps);
+    }
+
+    let gain_plan = aac::analyze_file(src)?;
+    let moov_rewrite = mp4::prepare_gain_metadata(src, gain_steps)?;
+    Ok((gain_plan, moov_rewrite))
+}
+
+fn open_output_stream(dst: &Path) -> Result<File> {
+    if let Ok(metadata) = fs::metadata(dst) {
+        if !metadata.file_type().is_file() {
+            return Ok(OpenOptions::new().write(true).open(dst)?);
+        }
+    }
+
+    Ok(OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .open(dst)?;
-
-    let modified =
-        aac::apply_gain_plan_to_file(&mut src_file, &mut dst_file, &gain_plan, gain_steps)?;
-    mp4::write_gain_metadata(&mut dst_file, gain_steps)?;
-    Ok(modified)
+        .open(dst)?)
 }
 
 fn ensure_distinct_paths(src: &Path, dst: &Path) -> Result<()> {
