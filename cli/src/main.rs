@@ -1,6 +1,6 @@
 use std::env;
 use std::fs::File;
-use std::io;
+use std::io::{self, BufWriter};
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -47,7 +47,7 @@ fn run(input: &str, output: &str, gain_steps: i32) -> m4againrs::Result<usize> {
     if output == "-" {
         let mut src = File::open(input)?;
         let stdout = io::stdout();
-        let mut stdout = stdout.lock();
+        let mut stdout = BufWriter::new(stdout.lock());
         return m4againrs::aac_apply_gain_to_writer(&mut src, &mut stdout, gain_steps);
     }
 
