@@ -33,8 +33,22 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 name = "m4againrs"
 version = "0.0.0"
 dependencies = [
- "pyo3",
  "thiserror",
+]
+
+[[package]]
+name = "m4againrs-cli"
+version = "0.0.0"
+dependencies = [
+ "m4againrs",
+]
+
+[[package]]
+name = "m4againrs-py"
+version = "0.0.0"
+dependencies = [
+ "m4againrs",
+ "pyo3",
 ]
 
 [[package]]

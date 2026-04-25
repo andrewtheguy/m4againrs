@@ -1,3 +1,6 @@
+[workspace]
+members = ["cli", "python"]
+
 [package]
 name = "m4againrs"
 version = "0.0.0"
@@ -5,15 +8,10 @@ edition = "2021"
 
 [lib]
 name = "m4againrs"
-crate-type = ["rlib", "cdylib"]
-
-[features]
-default = []
-python = ["dep:pyo3", "pyo3/extension-module"]
+crate-type = ["rlib"]
 
 [dependencies]
 thiserror = "2.0"
-pyo3 = { version = "0.27.2", optional = true, features = ["abi3-py39"] }
 
 [profile.release]
 lto = "thin"
