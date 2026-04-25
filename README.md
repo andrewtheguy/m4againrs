@@ -1,4 +1,4 @@
-# m4againpy
+# m4againrs
 
 Minimal Python + Rust library for **fixed-step gain adjustment of AAC audio in
 M4A/MP4 files**. It is based on https://github.com/M-Igashi/mp3rgain, narrowed
@@ -17,13 +17,13 @@ Prebuilt wheels (Linux x86_64/arm64, macOS arm64, Windows x86_64) are published
 via GitHub Pages as a PEP 503 index:
 
 ```bash
-pip install m4againpy --extra-index-url https://andrewtheguy.github.io/m4againpy/simple/
+pip install m4againrs --extra-index-url https://andrewtheguy.github.io/m4againrs/simple/
 ```
 
 Or with [uv](https://docs.astral.sh/uv/):
 
 ```bash
-uv pip install m4againpy --extra-index-url https://andrewtheguy.github.io/m4againpy/simple/
+uv pip install m4againrs --extra-index-url https://andrewtheguy.github.io/m4againrs/simple/
 ```
 
 Requires Python ≥ 3.9 (abi3 wheels).
@@ -33,8 +33,8 @@ Requires Python ≥ 3.9 (abi3 wheels).
 Needs a Rust toolchain (stable) and [maturin](https://www.maturin.rs/):
 
 ```bash
-git clone https://github.com/andrewtheguy/m4againpy.git
-cd m4againpy
+git clone https://github.com/andrewtheguy/m4againrs.git
+cd m4againrs
 uv venv
 uv pip install maturin
 uv run maturin develop --features python --release
@@ -43,35 +43,35 @@ uv run maturin develop --features python --release
 ## Usage
 
 ```python
-import m4againpy
+import m4againrs
 
 # Bytes in, bytes out
 with open("track.m4a", "rb") as f:
     data = f.read()
-louder = m4againpy.aac_apply_gain(data, 2)   # +2 steps  (~+3.0 dB)
-softer = m4againpy.aac_apply_gain(data, -2)  # -2 steps  (~-3.0 dB)
+louder = m4againrs.aac_apply_gain(data, 2)   # +2 steps  (~+3.0 dB)
+softer = m4againrs.aac_apply_gain(data, -2)  # -2 steps  (~-3.0 dB)
 
 # File: stream src, apply gain, write a different dst. src is never overwritten.
-m4againpy.aac_apply_gain_file("track.m4a", "track_louder.m4a", 2)
+m4againrs.aac_apply_gain_file("track.m4a", "track_louder.m4a", 2)
 
 # gain_steps == 0 raises RuntimeError in both variants.
 # Passing the same source and destination path also raises RuntimeError.
 
 # Step size is 1.5 dB by AAC spec
-m4againpy.GAIN_STEP_DB  # 1.5
+m4againrs.GAIN_STEP_DB  # 1.5
 ```
 
 ## Units
 
 `gain_steps` is the native AAC `global_gain` unit (an 8-bit integer in the
 bitstream). One step is 1.5 dB. If you want to think in dB, just divide:
-`steps = round(db / m4againpy.GAIN_STEP_DB)`.
+`steps = round(db / m4againrs.GAIN_STEP_DB)`.
 
 Zero steps is a no-op; gain locations are saturating-clamped to `0..=255`;
 locations with `global_gain == 0` are skipped (silence).
 
 The file API writes custom MP4 metadata to the destination:
-`TAG:M4AG=m4againpy version=1 gain_steps=<n> gain_step_db=1.5`.
+`TAG:M4AG=m4againrs version=1 gain_steps=<n> gain_step_db=1.5`.
 Use `ffprobe -export_all 1` to show the custom tag.
 
 ## Development

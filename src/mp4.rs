@@ -237,7 +237,7 @@ fn effective_top_level_box_size(
 
 fn with_gain_description(moov: &[u8], gain_steps: i32) -> std::io::Result<Vec<u8>> {
     let payload = format!(
-        "m4againpy version=1 gain_steps={gain_steps} gain_step_db={}",
+        "m4againrs version=1 gain_steps={gain_steps} gain_step_db={}",
         crate::GAIN_STEP_DB
     );
     let item = text_ilst_item(M4AG, payload.as_bytes())?;

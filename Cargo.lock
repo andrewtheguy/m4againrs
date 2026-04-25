@@ -30,7 +30,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
-name = "m4againpy"
+name = "m4againrs"
 version = "0.0.0"
 dependencies = [
  "pyo3",

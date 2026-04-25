@@ -75,7 +75,7 @@ def _parse_gain_metadata(buf):
         return None
 
     fields = payload.decode("utf-8").split()
-    if not fields or fields[0] != "m4againpy":
+    if not fields or fields[0] != "m4againrs":
         return None
 
     metadata = {}
@@ -222,12 +222,12 @@ def _parse_itunes_tags(buf):
 
 
 def _find_module():
-    env = os.environ.get("M4AGAINPY_PYTHON_MODULE")
+    env = os.environ.get("M4AGAINRS_PYTHON_MODULE")
     if env:
         path = Path(env)
         if path.exists():
             return path
-        raise FileNotFoundError(f"M4AGAINPY_PYTHON_MODULE points to a missing file: {path}")
+        raise FileNotFoundError(f"M4AGAINRS_PYTHON_MODULE points to a missing file: {path}")
 
     suffixes = list(importlib.machinery.EXTENSION_SUFFIXES)
     for fallback_suffix in (".so", ".dylib", ".pyd", ".dll"):
@@ -236,7 +236,7 @@ def _find_module():
 
     candidates = []
     for target_dir in ("debug", "release"):
-        for stem in ("libm4againpy", "m4againpy"):
+        for stem in ("libm4againrs", "m4againrs"):
             for suffix in suffixes:
                 candidates.append(PROJECT_ROOT / "target" / target_dir / f"{stem}{suffix}")
 
@@ -245,7 +245,7 @@ def _find_module():
             return path
 
     raise FileNotFoundError(
-        "Could not find the built m4againpy extension. "
+        "Could not find the built m4againrs extension. "
         "Build it first with `cargo build --features python --lib` "
         "or `maturin develop --skip-install --features python`."
     )
@@ -253,65 +253,65 @@ def _find_module():
 
 def _load_module():
     path = _find_module()
-    spec = importlib.util.spec_from_file_location("m4againpy", str(path))
+    spec = importlib.util.spec_from_file_location("m4againrs", str(path))
     if spec is None or spec.loader is None:
         if path.suffix in {".dylib", ".dll"}:
             spec = importlib.util.spec_from_file_location(
-                "m4againpy",
+                "m4againrs",
                 str(path),
-                loader=importlib.machinery.ExtensionFileLoader("m4againpy", str(path)),
+                loader=importlib.machinery.ExtensionFileLoader("m4againrs", str(path)),
             )
 
     if spec is None or spec.loader is None:
-        raise RuntimeError(f"Could not load m4againpy module from {path}")
+        raise RuntimeError(f"Could not load m4againrs module from {path}")
 
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
 
 
-m4againpy = _load_module()
+m4againrs = _load_module()
 
 
-class M4aGainPyTest(unittest.TestCase):
+class M4aGainRsTest(unittest.TestCase):
     def test_gain_step_db_constant(self):
-        self.assertEqual(m4againpy.GAIN_STEP_DB, 1.5)
+        self.assertEqual(m4againrs.GAIN_STEP_DB, 1.5)
 
     # -- bytes API --
 
     def test_bytes_zero_raises(self):
         data = TEST_M4A.read_bytes()
         with self.assertRaises(RuntimeError):
-            m4againpy.aac_apply_gain(data, 0)
+            m4againrs.aac_apply_gain(data, 0)
 
     def test_bytes_preserves_length(self):
         data = TEST_M4A.read_bytes()
-        out = m4againpy.aac_apply_gain(data, 2)
+        out = m4againrs.aac_apply_gain(data, 2)
         self.assertEqual(len(out), len(data))
 
     def test_bytes_positive_mutates(self):
         data = TEST_M4A.read_bytes()
-        out = m4againpy.aac_apply_gain(data, 2)
+        out = m4againrs.aac_apply_gain(data, 2)
         self.assertNotEqual(out, data)
 
     def test_bytes_negative_mutates(self):
         data = TEST_M4A.read_bytes()
-        out = m4againpy.aac_apply_gain(data, -2)
+        out = m4againrs.aac_apply_gain(data, -2)
         self.assertNotEqual(out, data)
 
     def test_bytes_inverse_round_trip(self):
         data = TEST_M4A.read_bytes()
-        up = m4againpy.aac_apply_gain(data, 2)
-        back = m4againpy.aac_apply_gain(up, -2)
+        up = m4againrs.aac_apply_gain(data, 2)
+        back = m4againrs.aac_apply_gain(up, -2)
         self.assertEqual(back, data)
 
     def test_bytes_not_m4a_raises(self):
         with self.assertRaises(RuntimeError):
-            m4againpy.aac_apply_gain(b"\x00" * 128, 2)
+            m4againrs.aac_apply_gain(b"\x00" * 128, 2)
 
     def test_bytes_returns_bytes_type(self):
         data = TEST_M4A.read_bytes()
-        self.assertIsInstance(m4againpy.aac_apply_gain(data, 2), bytes)
+        self.assertIsInstance(m4againrs.aac_apply_gain(data, 2), bytes)
 
     # -- file API --
 
@@ -322,7 +322,7 @@ class M4aGainPyTest(unittest.TestCase):
             shutil.copy2(TEST_M4A, src)
             before = src.read_bytes()
             with self.assertRaises(RuntimeError):
-                m4againpy.aac_apply_gain_file(str(src), str(dst), 0)
+                m4againrs.aac_apply_gain_file(str(src), str(dst), 0)
             self.assertFalse(dst.exists())
             self.assertEqual(src.read_bytes(), before)
 
@@ -333,7 +333,7 @@ class M4aGainPyTest(unittest.TestCase):
             before = src.read_bytes()
 
             with self.assertRaises(RuntimeError):
-                m4againpy.aac_apply_gain_file(str(src), str(src), 2)
+                m4againrs.aac_apply_gain_file(str(src), str(src), 2)
 
             self.assertEqual(src.read_bytes(), before)
 
@@ -344,7 +344,7 @@ class M4aGainPyTest(unittest.TestCase):
             shutil.copy2(TEST_M4A, src)
             original = src.read_bytes()
 
-            modified = m4againpy.aac_apply_gain_file(str(src), str(dst), 2)
+            modified = m4againrs.aac_apply_gain_file(str(src), str(dst), 2)
             self.assertGreater(modified, 0)
 
             self.assertTrue(dst.exists())
@@ -366,7 +366,7 @@ class M4aGainPyTest(unittest.TestCase):
             dst = Path(tmpdir) / "out.m4a"
             shutil.copy2(TEST_M4A, src)
 
-            m4againpy.aac_apply_gain_file(str(src), str(dst), -3)
+            m4againrs.aac_apply_gain_file(str(src), str(dst), -3)
 
             self.assertIsNone(_parse_gain_metadata(src.read_bytes()))
             metadata = _parse_gain_metadata(dst.read_bytes())
@@ -393,7 +393,7 @@ class M4aGainPyTest(unittest.TestCase):
                 text=True,
             )
             self.assertIn(
-                "TAG:M4AG=m4againpy version=1 gain_steps=-3 gain_step_db=1.5",
+                "TAG:M4AG=m4againrs version=1 gain_steps=-3 gain_step_db=1.5",
                 probe.stdout,
             )
 
@@ -405,14 +405,14 @@ class M4aGainPyTest(unittest.TestCase):
             shutil.copy2(TEST_M4A, src)
             original = src.read_bytes()
 
-            m4againpy.aac_apply_gain_file(str(src), str(dst), -3)
+            m4againrs.aac_apply_gain_file(str(src), str(dst), -3)
             self.assertEqual(src.read_bytes(), original)
 
     def test_file_nonexistent_raises(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             dst = Path(tmpdir) / "out.m4a"
             with self.assertRaises(RuntimeError):
-                m4againpy.aac_apply_gain_file(
+                m4againrs.aac_apply_gain_file(
                     "/nonexistent/path/file.m4a", str(dst), 2
                 )
             self.assertFalse(dst.exists())
@@ -421,7 +421,7 @@ class M4aGainPyTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             dst = Path(tmpdir) / "out.m4a"
             with self.assertRaises(RuntimeError):
-                m4againpy.aac_apply_gain_file(
+                m4againrs.aac_apply_gain_file(
                     str(PROJECT_ROOT / ".gitignore"), str(dst), 2
                 )
             self.assertFalse(dst.exists())
@@ -435,14 +435,14 @@ class MetadataPreservationTest(unittest.TestCase):
     def test_file_length_preserved(self):
         data = TEST_M4A.read_bytes()
         for steps in (-5, -2, -1, 1, 2, 5):
-            self.assertEqual(len(m4againpy.aac_apply_gain(data, steps)), len(data))
+            self.assertEqual(len(m4againrs.aac_apply_gain(data, steps)), len(data))
 
     def test_container_bytes_outside_samples_unchanged_bytes_api(self):
         """Zero out all AAC-sample bytes, then the rest must match exactly."""
         data = TEST_M4A.read_bytes()
         redacted_original = _redact_sample_bytes(data)
         for steps in (-5, -2, -1, 1, 2, 5):
-            out = m4againpy.aac_apply_gain(data, steps)
+            out = m4againrs.aac_apply_gain(data, steps)
             redacted_out = _redact_sample_bytes(out)
             self.assertEqual(
                 redacted_original,
@@ -458,14 +458,14 @@ class MetadataPreservationTest(unittest.TestCase):
             src_bytes = src.read_bytes()
             before_tags = _parse_itunes_tags(src_bytes)
 
-            m4againpy.aac_apply_gain_file(str(src), str(dst), 3)
+            m4againrs.aac_apply_gain_file(str(src), str(dst), 3)
 
             # src untouched
             self.assertEqual(src.read_bytes(), src_bytes)
 
             after_tags = _parse_itunes_tags(dst.read_bytes())
             expected_tags = dict(before_tags)
-            expected_tags[b"M4AG"] = b"m4againpy version=1 gain_steps=3 gain_step_db=1.5"
+            expected_tags[b"M4AG"] = b"m4againrs version=1 gain_steps=3 gain_step_db=1.5"
             self.assertEqual(after_tags, expected_tags)
 
     def test_file_api_preserves_existing_description_tag(self):
@@ -493,13 +493,13 @@ class MetadataPreservationTest(unittest.TestCase):
             before_tags = _parse_itunes_tags(src.read_bytes())
             self.assertEqual(before_tags.get(b"desc"), b"Existing description")
 
-            m4againpy.aac_apply_gain_file(str(src), str(dst), 2)
+            m4againrs.aac_apply_gain_file(str(src), str(dst), 2)
 
             after_tags = _parse_itunes_tags(dst.read_bytes())
             self.assertEqual(after_tags.get(b"desc"), b"Existing description")
             self.assertEqual(
                 after_tags.get(b"M4AG"),
-                b"m4againpy version=1 gain_steps=2 gain_step_db=1.5",
+                b"m4againrs version=1 gain_steps=2 gain_step_db=1.5",
             )
 
     def test_file_api_rewrites_chunk_offsets_when_moov_growth_moves_media(self):
@@ -533,7 +533,7 @@ class MetadataPreservationTest(unittest.TestCase):
             self.assertLess(src_moov[0], src_mdat[0])
             original_ranges = _sample_byte_ranges(src_bytes)
 
-            modified = m4againpy.aac_apply_gain_file(str(src), str(dst), 2)
+            modified = m4againrs.aac_apply_gain_file(str(src), str(dst), 2)
             self.assertGreater(modified, 0)
 
             dst_bytes = dst.read_bytes()
@@ -559,7 +559,7 @@ class MetadataPreservationTest(unittest.TestCase):
         data = TEST_M4A.read_bytes()
         original_ranges = _sample_byte_ranges(data)
         for steps in (-5, 2, 10):
-            out = m4againpy.aac_apply_gain(data, steps)
+            out = m4againrs.aac_apply_gain(data, steps)
             self.assertEqual(_sample_byte_ranges(out), original_ranges)
 
     def test_itunes_ilst_tag_preserved(self):
@@ -572,7 +572,7 @@ class MetadataPreservationTest(unittest.TestCase):
         self.assertIn(b"\xa9", original_ilst)
 
         for steps in (-3, 1, 4):
-            out = m4againpy.aac_apply_gain(data, steps)
+            out = m4againrs.aac_apply_gain(data, steps)
             self.assertEqual(_find_ilst_blob(out), original_ilst)
 
     def test_ftyp_preserved(self):
@@ -583,7 +583,7 @@ class MetadataPreservationTest(unittest.TestCase):
         original_ftyp = data[ftyp[0] : ftyp[0] + ftyp[1]]
 
         for steps in (-3, 2):
-            out = m4againpy.aac_apply_gain(data, steps)
+            out = m4againrs.aac_apply_gain(data, steps)
             ftyp_out = _find_box(out, b"ftyp")
             self.assertEqual(out[ftyp_out[0] : ftyp_out[0] + ftyp_out[1]], original_ftyp)
 
@@ -621,7 +621,7 @@ class ShortWindowAacTest(unittest.TestCase):
             )
 
             sample_count = len(_sample_byte_ranges(src.read_bytes()))
-            modified = m4againpy.aac_apply_gain_file(str(src), str(dst), 5)
+            modified = m4againrs.aac_apply_gain_file(str(src), str(dst), 5)
             self.assertEqual(modified, sample_count * 2)
 
             subprocess.run(
@@ -651,7 +651,7 @@ class TaggedFixtureTest(unittest.TestCase):
 
     EXPECTED_TAGS = {
         b"\xa9nam": b"Gain Test Tone",
-        b"\xa9ART": b"m4againpy",
+        b"\xa9ART": b"m4againrs",
         b"\xa9alb": b"Fixtures",
         b"\xa9day": b"2026",
         b"\xa9gen": b"Electronic",
@@ -672,7 +672,7 @@ class TaggedFixtureTest(unittest.TestCase):
         data = TAGGED_M4A.read_bytes()
         before = _parse_itunes_tags(data)
         for steps in (-5, -2, 1, 3, 8):
-            out = m4againpy.aac_apply_gain(data, steps)
+            out = m4againrs.aac_apply_gain(data, steps)
             after = _parse_itunes_tags(out)
             self.assertEqual(before, after, f"tags changed at gain_steps={steps}")
 
@@ -681,7 +681,7 @@ class TaggedFixtureTest(unittest.TestCase):
         data = TAGGED_M4A.read_bytes()
         redacted_original = _redact_sample_bytes(data)
         for steps in (-3, 2, 7):
-            out = m4againpy.aac_apply_gain(data, steps)
+            out = m4againrs.aac_apply_gain(data, steps)
             self.assertEqual(_redact_sample_bytes(out), redacted_original)
 
     def test_ilst_blob_identical_after_gain(self):
@@ -689,7 +689,7 @@ class TaggedFixtureTest(unittest.TestCase):
         original_ilst = _find_ilst_blob(data)
         self.assertIsNotNone(original_ilst)
         for steps in (-3, 2, 7):
-            out = m4againpy.aac_apply_gain(data, steps)
+            out = m4againrs.aac_apply_gain(data, steps)
             self.assertEqual(_find_ilst_blob(out), original_ilst)
 
     def test_file_api_preserves_tags_and_adds_custom_gain_tag(self):
@@ -700,7 +700,7 @@ class TaggedFixtureTest(unittest.TestCase):
             src_original = src.read_bytes()
             before = _parse_itunes_tags(src_original)
 
-            modified = m4againpy.aac_apply_gain_file(str(src), str(dst), 4)
+            modified = m4againrs.aac_apply_gain_file(str(src), str(dst), 4)
             self.assertGreater(modified, 0)
 
             # src untouched
@@ -708,14 +708,14 @@ class TaggedFixtureTest(unittest.TestCase):
             # dst preserves existing tags and adds ffprobe-visible gain metadata
             after = _parse_itunes_tags(dst.read_bytes())
             expected = dict(before)
-            expected[b"M4AG"] = b"m4againpy version=1 gain_steps=4 gain_step_db=1.5"
+            expected[b"M4AG"] = b"m4againrs version=1 gain_steps=4 gain_step_db=1.5"
             self.assertEqual(expected, after)
 
     def test_gain_actually_applied_on_fixture(self):
         """Sanity: ensure the fixture has non-silent samples so the gain test
         isn't trivially passing on all-zeroed gain locations."""
         data = TAGGED_M4A.read_bytes()
-        out = m4againpy.aac_apply_gain(data, 3)
+        out = m4againrs.aac_apply_gain(data, 3)
         self.assertNotEqual(out, data)
 
 
