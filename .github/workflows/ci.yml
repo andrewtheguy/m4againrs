@@ -25,14 +25,17 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Run Rust tests (workspace)
-        run: cargo test --workspace
+      - name: Run library tests (lib/)
+        run: cargo test -p m4againrs
+
+      - name: Run CLI end-to-end tests (cli/)
+        run: cargo test -p m4againrs-cli
 
       - name: Build Python extension
         env:
           PYO3_PYTHON: python
         run: cargo build -p m4againrs-py
 
-      - name: Run Python binding tests
+      - name: Run Python binding tests (python/)
         working-directory: python
         run: python -m unittest tests.test_python_bindings

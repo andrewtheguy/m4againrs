@@ -91,7 +91,9 @@ Requires Python ≥ 3.9 (abi3 wheels).
 ```python
 import m4againrs
 
-m4againrs.aac_apply_gain_file("track.m4a", "track_louder.m4a", 2)
+m4againrs.aac_apply_gain_file("track.m4a", "track_louder_file.m4a", 2)
+with open("track_louder_writer.m4a", "wb") as output:
+    m4againrs.aac_apply_gain_to_writer("track.m4a", output, 2)
 m4againrs.GAIN_STEP_DB  # 1.5
 ```
 
