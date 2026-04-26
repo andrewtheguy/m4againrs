@@ -9,6 +9,8 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 
 // Four-cc constants used by the AAC walk.
 pub(crate) const MOOV: u32 = u32::from_be_bytes(*b"moov");
+pub(crate) const MDAT: u32 = u32::from_be_bytes(*b"mdat");
+pub(crate) const FTYP: u32 = u32::from_be_bytes(*b"ftyp");
 pub(crate) const TRAK: u32 = u32::from_be_bytes(*b"trak");
 pub(crate) const MDIA: u32 = u32::from_be_bytes(*b"mdia");
 pub(crate) const MINF: u32 = u32::from_be_bytes(*b"minf");
@@ -249,7 +251,7 @@ fn effective_top_level_box_size(
     Ok(size)
 }
 
-fn with_gain_description(moov: &[u8], gain_steps: i32) -> std::io::Result<Vec<u8>> {
+pub(crate) fn with_gain_description(moov: &[u8], gain_steps: i32) -> std::io::Result<Vec<u8>> {
     let payload = format!(
         "m4againrs version=1 gain_steps={gain_steps} gain_step_db={}",
         crate::GAIN_STEP_DB
@@ -367,7 +369,11 @@ fn text_ilst_item(item_type: u32, text: &[u8]) -> std::io::Result<Vec<u8>> {
     make_box(item_type, &make_box(DATA, &data_payload)?)
 }
 
-fn adjust_chunk_offsets_after(moov: &mut [u8], threshold: u64, delta: i64) -> std::io::Result<()> {
+pub(crate) fn adjust_chunk_offsets_after(
+    moov: &mut [u8],
+    threshold: u64,
+    delta: i64,
+) -> std::io::Result<()> {
     if delta == 0 {
         return Ok(());
     }

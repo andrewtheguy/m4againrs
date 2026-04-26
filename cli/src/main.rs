@@ -1,10 +1,10 @@
 use std::env;
 use std::fs::File;
-use std::io::{self, BufWriter};
+use std::io::{self, BufReader, BufWriter};
 use std::path::Path;
 use std::process::ExitCode;
 
-const USAGE: &str = "Usage: m4againrs <input.m4a> <output.m4a|-> <gain_steps>";
+const USAGE: &str = "Usage: m4againrs <input.m4a|-> <output.m4a|-> <gain_steps>";
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
@@ -44,12 +44,31 @@ fn main() -> ExitCode {
 }
 
 fn run(input: &str, output: &str, gain_steps: i32) -> m4againrs::Result<usize> {
-    if output == "-" {
-        let mut src = File::open(input)?;
-        let stdout = io::stdout();
-        let mut stdout = BufWriter::new(stdout.lock());
-        return m4againrs::aac_apply_gain_to_writer(&mut src, &mut stdout, gain_steps);
-    }
+    let stdin_input = input == "-";
+    let stdout_output = output == "-";
 
-    m4againrs::aac_apply_gain_file(Path::new(input), Path::new(output), gain_steps)
+    match (stdin_input, stdout_output) {
+        (true, true) => {
+            let stdin = io::stdin();
+            let mut src = BufReader::new(stdin.lock());
+            let stdout = io::stdout();
+            let mut dst = BufWriter::new(stdout.lock());
+            m4againrs::aac_apply_gain_streaming(&mut src, &mut dst, gain_steps)
+        }
+        (true, false) => {
+            let stdin = io::stdin();
+            let mut src = BufReader::new(stdin.lock());
+            let mut dst = BufWriter::new(File::create(output)?);
+            m4againrs::aac_apply_gain_streaming(&mut src, &mut dst, gain_steps)
+        }
+        (false, true) => {
+            let mut src = File::open(input)?;
+            let stdout = io::stdout();
+            let mut dst = BufWriter::new(stdout.lock());
+            m4againrs::aac_apply_gain_to_writer(&mut src, &mut dst, gain_steps)
+        }
+        (false, false) => {
+            m4againrs::aac_apply_gain_file(Path::new(input), Path::new(output), gain_steps)
+        }
+    }
 }

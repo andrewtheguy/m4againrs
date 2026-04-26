@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -163,6 +164,80 @@ fn writer_api_accepts_forward_only_output() {
         parse_itunes_tags(&dst).get(b"M4AG".as_slice()),
         Some(&b"m4againrs version=1 gain_steps=2 gain_step_db=1.5".to_vec())
     );
+}
+
+#[test]
+fn streaming_api_rejects_zero_gain_steps() {
+    let mut src = Cursor::new(Vec::<u8>::new());
+    let mut dst = Vec::new();
+
+    let err = m4againrs::aac_apply_gain_streaming(&mut src, &mut dst, 0).unwrap_err();
+
+    assert!(matches!(err, m4againrs::Error::ZeroGainSteps));
+    assert!(dst.is_empty());
+}
+
+#[test]
+fn streaming_api_rejects_non_faststart_input() {
+    // The bundled test.m4a is non-faststart (mdat before moov). Confirm that
+    // the streaming API rejects it without writing any audio bytes — only the
+    // ftyp header (and any pre-mdat free box) may have been streamed before
+    // mdat is encountered.
+    let bytes = fs::read(testdata_path("test.m4a")).expect("failed to read fixture");
+    let mut src = Cursor::new(&bytes);
+    let mut dst = Vec::new();
+
+    let err = m4againrs::aac_apply_gain_streaming(&mut src, &mut dst, 2).unwrap_err();
+
+    assert!(matches!(err, m4againrs::Error::NonFaststartInput));
+    // Pre-moov boxes (ftyp, free) may be in dst; mdat must not be.
+    assert!(!dst.windows(4).any(|w| w == b"mdat"));
+}
+
+#[test]
+fn streaming_api_patches_faststart_fixture() {
+    let fixture = testdata_path("test_faststart.m4a");
+    let bytes = fs::read(&fixture).expect("failed to read faststart fixture");
+    let src_ranges = sample_byte_ranges(&bytes);
+    let mut src = Cursor::new(&bytes);
+    let mut dst = Vec::new();
+
+    let modified = m4againrs::aac_apply_gain_streaming(&mut src, &mut dst, 3)
+        .expect("streaming API should accept faststart input");
+
+    assert!(modified > 0);
+    let dst_ranges = sample_byte_ranges(&dst);
+    assert_same_sample_sizes(&src_ranges, &dst_ranges);
+    assert!(
+        sample_payloads_differ(&bytes, &dst, &src_ranges, &dst_ranges),
+        "no AAC sample bytes changed"
+    );
+    assert_eq!(
+        parse_itunes_tags(&dst).get(b"M4AG".as_slice()),
+        Some(&b"m4againrs version=1 gain_steps=3 gain_step_db=1.5".to_vec())
+    );
+}
+
+#[test]
+fn streaming_api_matches_writer_api_for_faststart_input() {
+    // The load-bearing correctness check: for faststart input, both APIs share
+    // the same moov rewrite, sample table, and patch math, so the outputs MUST
+    // be byte-identical.
+    let bytes = fs::read(testdata_path("test_faststart.m4a"))
+        .expect("failed to read faststart fixture");
+
+    let mut writer_out = Vec::new();
+    let writer_modified =
+        m4againrs::aac_apply_gain_to_writer(&mut Cursor::new(&bytes), &mut writer_out, 3)
+            .expect("writer API should accept faststart input");
+
+    let mut streaming_out = Vec::new();
+    let streaming_modified =
+        m4againrs::aac_apply_gain_streaming(&mut Cursor::new(&bytes), &mut streaming_out, 3)
+            .expect("streaming API should accept faststart input");
+
+    assert_eq!(writer_modified, streaming_modified);
+    assert_eq!(writer_out, streaming_out);
 }
 
 fn copy_fixture(src: &Path, dst: &Path) {

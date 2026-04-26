@@ -46,6 +46,25 @@ pub fn aac_apply_gain_to_writer<R: Read + Seek, W: Write>(
     aac::apply_gain_plan_to_writer(src, dst, &gain_plan, &moov_rewrite, gain_steps)
 }
 
+/// Apply a static `gain_steps` while streaming forward-only on both ends —
+/// neither the input nor the output needs `Seek`.
+///
+/// Requires the input to be **faststart**: the `moov` box must precede the
+/// `mdat` box. If `mdat` is encountered first, [`Error::NonFaststartInput`] is
+/// returned and only the bytes of any pre-`moov` boxes (typically `ftyp`) will
+/// have been written to `dst`; that partial output is unusable. For arbitrary
+/// MP4 layouts use [`aac_apply_gain_to_writer`] with a seekable source.
+pub fn aac_apply_gain_streaming<R: Read, W: Write>(
+    src: &mut R,
+    dst: &mut W,
+    gain_steps: i32,
+) -> Result<usize> {
+    if gain_steps == 0 {
+        return Err(Error::ZeroGainSteps);
+    }
+    aac::apply_gain_plan_streaming(src, dst, gain_steps)
+}
+
 fn prepare_gain<R: Read + Seek>(
     src: &mut R,
     gain_steps: i32,

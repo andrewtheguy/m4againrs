@@ -114,11 +114,9 @@ fn analyze_locations_in_file<R: Read + Seek>(file: &mut R) -> Result<Vec<AacGain
         file.seek(SeekFrom::Start(entry.file_offset))?;
         file.read_exact(&mut sample_data)?;
 
-        let mut reader = BitReader::new(&sample_data);
-
         let location_start = all_locations.len();
-        match parse_raw_data_block(
-            &mut reader,
+        match parse_sample_locations(
+            &sample_data,
             sample_rate,
             entry.file_offset,
             &mut all_locations,
@@ -138,6 +136,16 @@ fn analyze_locations_in_file<R: Read + Seek>(file: &mut R) -> Result<Vec<AacGain
     }
 
     Ok(all_locations)
+}
+
+fn parse_sample_locations(
+    sample_bytes: &[u8],
+    sample_rate: u32,
+    file_offset: u64,
+    locations: &mut Vec<AacGainLocation>,
+) -> Result<()> {
+    let mut reader = BitReader::new(sample_bytes);
+    parse_raw_data_block(&mut reader, sample_rate, file_offset, locations)
 }
 
 fn is_mp4_file<R: Read + Seek>(file: &mut R) -> Result<bool> {
@@ -1444,4 +1452,356 @@ fn copy_plain_range<R: Read + Seek, W: Write>(
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Streaming-input variant: forward-only Read + Write
+// ---------------------------------------------------------------------------
+
+/// Apply `gain_steps` while streaming both ends. Requires the input to be
+/// faststart (`moov` box before `mdat`). If `mdat` is encountered before
+/// `moov`, `Error::NonFaststartInput` is returned and the only output written
+/// is whatever pre-`moov` boxes (typically `ftyp` and trailing `free`) had
+/// already been streamed; that partial output is unusable.
+pub(crate) fn apply_gain_plan_streaming<R: Read, W: Write>(
+    src: &mut R,
+    dst: &mut W,
+    gain_steps: i32,
+) -> Result<usize> {
+    let mut input_cursor: u64 = 0;
+    let mut state: Option<StreamingState> = None;
+    let mut modified = 0usize;
+    let mut saw_first_box = false;
+
+    loop {
+        let Some(header) = read_box_header_streaming(src)? else {
+            break;
+        };
+        let header_bytes = encode_box_header(&header);
+        let content_size = header.content_size();
+        let body_start = input_cursor + header.header_size as u64;
+
+        if !saw_first_box {
+            if header.box_type != mp4::FTYP {
+                return Err(Error::NotMp4);
+            }
+            // Validate ftyp brand on a buffered prefix, then stream both header and body to dst.
+            let body_size = checked_usize_u64(content_size, "ftyp body too large")?;
+            let mut body = vec![0u8; body_size];
+            src.read_exact(&mut body)?;
+            let mut prefix = header_bytes.clone();
+            prefix.extend_from_slice(&body);
+            if !mp4::is_mp4(&prefix) {
+                return Err(Error::NotMp4);
+            }
+            dst.write_all(&prefix)?;
+            input_cursor = body_start + content_size;
+            saw_first_box = true;
+            continue;
+        }
+
+        match (state.as_ref(), header.box_type) {
+            (None, mp4::MDAT) => return Err(Error::NonFaststartInput),
+            (None, mp4::MOOV) => {
+                let body_size = checked_usize_u64(content_size, "moov box too large")?;
+                let mut old_moov = Vec::with_capacity(header_bytes.len() + body_size);
+                old_moov.extend_from_slice(&header_bytes);
+                old_moov.resize(header_bytes.len() + body_size, 0);
+                src.read_exact(&mut old_moov[header_bytes.len()..])?;
+
+                if header.header_size != 8 {
+                    return Err(Error::AacParse {
+                        message: "extended-size moov box not supported".into(),
+                    });
+                }
+
+                let old_moov_end = input_cursor + old_moov.len() as u64;
+                let mut new_moov = mp4::with_gain_description(&old_moov, gain_steps)?;
+                let delta = new_moov.len() as i64 - old_moov.len() as i64;
+                mp4::adjust_chunk_offsets_after(&mut new_moov, old_moov_end, delta)?;
+                dst.write_all(&new_moov)?;
+
+                let (mut sample_table, stsd_pos) = build_sample_table(&old_moov)?;
+                let sample_rate = parse_audio_config(&old_moov, stsd_pos)?;
+                sample_table.sort_by_key(|entry| entry.file_offset);
+
+                state = Some(StreamingState {
+                    sample_table,
+                    sample_rate,
+                    sample_idx: 0,
+                    parse_warnings: 0,
+                });
+                input_cursor += old_moov.len() as u64;
+            }
+            (None, _) => {
+                // Pre-moov pass-through (free, skip, wide, etc.).
+                dst.write_all(&header_bytes)?;
+                copy_n_bytes(src, dst, content_size)?;
+                input_cursor = body_start + content_size;
+            }
+            (Some(_), _) => {
+                dst.write_all(&header_bytes)?;
+                input_cursor += header.header_size as u64;
+                let body_end = if header.size == 0 {
+                    u64::MAX
+                } else {
+                    body_start + content_size
+                };
+                modified += stream_box_body(
+                    src,
+                    dst,
+                    state.as_mut().expect("state set above"),
+                    &mut input_cursor,
+                    body_end,
+                    gain_steps,
+                )?;
+            }
+        }
+    }
+
+    let Some(state) = state else {
+        return Err(Error::NoMoovBox);
+    };
+
+    dst.flush()?;
+
+    if modified == 0 && state.parse_warnings > 0 && state.sample_table.is_empty() {
+        return Err(Error::AacParseFailure {
+            warnings: state.parse_warnings,
+        });
+    }
+
+    Ok(modified)
+}
+
+struct StreamingState {
+    sample_table: Vec<SampleEntry>,
+    sample_rate: u32,
+    sample_idx: usize,
+    parse_warnings: u32,
+}
+
+/// Stream the body of a post-moov top-level box, intercepting any AAC samples
+/// that fall inside it for in-place gain patching. Returns the number of gain
+/// locations actually modified inside this body.
+fn stream_box_body<R: Read, W: Write>(
+    src: &mut R,
+    dst: &mut W,
+    state: &mut StreamingState,
+    input_cursor: &mut u64,
+    body_end: u64,
+    gain_steps: i32,
+) -> Result<usize> {
+    let mut sample_buf: Vec<u8> = Vec::new();
+    let mut locs: Vec<AacGainLocation> = Vec::new();
+    let mut modified_here = 0usize;
+
+    while *input_cursor < body_end {
+        // Skip samples already entirely behind us. MUST be `<=` not `<`:
+        // a sample's recorded end byte is exclusive.
+        while state.sample_idx < state.sample_table.len() {
+            let entry = &state.sample_table[state.sample_idx];
+            let sample_end = entry
+                .file_offset
+                .checked_add(entry.size as u64)
+                .ok_or_else(|| Error::AacParse {
+                    message: "sample range overflow".into(),
+                })?;
+            if sample_end <= *input_cursor {
+                state.sample_idx += 1;
+            } else {
+                break;
+            }
+        }
+
+        let next_sample_offset = state
+            .sample_table
+            .get(state.sample_idx)
+            .map(|e| e.file_offset);
+
+        let next_offset_in_body = match next_sample_offset {
+            Some(off) if off < body_end => off,
+            _ => {
+                // No more samples in this body — stream the remainder.
+                if body_end == u64::MAX {
+                    let copied = copy_to_eof(src, dst)?;
+                    *input_cursor = input_cursor.saturating_add(copied);
+                } else {
+                    let remaining = body_end - *input_cursor;
+                    copy_n_bytes(src, dst, remaining)?;
+                    *input_cursor = body_end;
+                }
+                break;
+            }
+        };
+
+        if next_offset_in_body < *input_cursor {
+            return Err(Error::AacParse {
+                message: "sample table not monotonically increasing".into(),
+            });
+        }
+
+        let entry_offset = state.sample_table[state.sample_idx].file_offset;
+        let entry_size = state.sample_table[state.sample_idx].size;
+        let sample_end = entry_offset + entry_size as u64;
+        if sample_end > body_end {
+            return Err(Error::AacParse {
+                message: "sample crosses mdat boundary".into(),
+            });
+        }
+
+        // Plain-copy any gap bytes (padding between samples, or pre-sample bytes).
+        let gap = next_offset_in_body - *input_cursor;
+        if gap > 0 {
+            copy_n_bytes(src, dst, gap)?;
+            *input_cursor += gap;
+        }
+
+        // Buffer the sample, parse + patch, then write.
+        sample_buf.resize(entry_size as usize, 0);
+        src.read_exact(&mut sample_buf)?;
+
+        locs.clear();
+        match parse_sample_locations(&sample_buf, state.sample_rate, entry_offset, &mut locs) {
+            Ok(()) => {
+                modified_here += apply_gain_to_sample_buffer(
+                    &mut sample_buf,
+                    &locs,
+                    entry_offset,
+                    gain_steps,
+                );
+            }
+            Err(_) => {
+                state.parse_warnings += 1;
+                // Pass the sample through unmodified — output bytes have not been emitted yet.
+                locs.clear();
+            }
+        }
+        dst.write_all(&sample_buf)?;
+        *input_cursor += entry_size as u64;
+        state.sample_idx += 1;
+    }
+
+    Ok(modified_here)
+}
+
+fn apply_gain_to_sample_buffer(
+    sample_buf: &mut [u8],
+    locs: &[AacGainLocation],
+    sample_offset: u64,
+    gain_steps: i32,
+) -> usize {
+    let mut modified = 0usize;
+    for loc in locs {
+        if loc.original_gain == 0 {
+            continue;
+        }
+        let new_value = adjust_gain_value(loc.original_gain, gain_steps);
+        if new_value == loc.original_gain {
+            continue;
+        }
+        let offset = (loc.file_offset - sample_offset) as usize;
+        write_bits_u8(&mut sample_buf[offset..], 0, loc.bit_offset, new_value);
+        modified += 1;
+    }
+    modified
+}
+
+/// Read a top-level box header from `src`. Returns `Ok(None)` only when a
+/// clean EOF is encountered at the box boundary (zero bytes read on the first
+/// attempt). Any other short read inside the header is an error.
+fn read_box_header_streaming<R: Read>(src: &mut R) -> Result<Option<mp4::BoxHeader>> {
+    let mut buf = [0u8; 8];
+    let mut filled = 0usize;
+    while filled < 8 {
+        let n = src.read(&mut buf[filled..])?;
+        if n == 0 {
+            if filled == 0 {
+                return Ok(None);
+            }
+            return Err(Error::AacParse {
+                message: "unexpected EOF in box header".into(),
+            });
+        }
+        filled += n;
+    }
+
+    let size_u32 = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    let box_type = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
+
+    let (size, header_size) = if size_u32 == 1 {
+        let mut ext = [0u8; 8];
+        src.read_exact(&mut ext)?;
+        (u64::from_be_bytes(ext), 16u8)
+    } else if size_u32 == 0 {
+        (0u64, 8u8)
+    } else {
+        (size_u32 as u64, 8u8)
+    };
+
+    Ok(Some(mp4::BoxHeader {
+        size,
+        box_type,
+        header_size,
+    }))
+}
+
+fn encode_box_header(header: &mp4::BoxHeader) -> Vec<u8> {
+    if header.header_size == 16 {
+        let mut out = Vec::with_capacity(16);
+        out.extend_from_slice(&1u32.to_be_bytes());
+        out.extend_from_slice(&header.box_type.to_be_bytes());
+        out.extend_from_slice(&header.size.to_be_bytes());
+        out
+    } else {
+        let mut out = Vec::with_capacity(8);
+        let size_u32 = if header.size == 0 {
+            0u32
+        } else {
+            u32::try_from(header.size).unwrap_or(u32::MAX)
+        };
+        out.extend_from_slice(&size_u32.to_be_bytes());
+        out.extend_from_slice(&header.box_type.to_be_bytes());
+        out
+    }
+}
+
+fn copy_n_bytes<R: Read, W: Write>(src: &mut R, dst: &mut W, n: u64) -> Result<()> {
+    const COPY_CHUNK_SIZE: usize = 1024 * 1024;
+    let mut remaining = n;
+    let mut buf = vec![0u8; COPY_CHUNK_SIZE.min(remaining as usize).max(1)];
+    while remaining > 0 {
+        let len = usize::try_from(remaining.min(COPY_CHUNK_SIZE as u64)).map_err(|_| {
+            Error::AacParse {
+                message: "copy chunk too large".into(),
+            }
+        })?;
+        if buf.len() < len {
+            buf.resize(len, 0);
+        }
+        src.read_exact(&mut buf[..len])?;
+        dst.write_all(&buf[..len])?;
+        remaining -= len as u64;
+    }
+    Ok(())
+}
+
+fn copy_to_eof<R: Read, W: Write>(src: &mut R, dst: &mut W) -> Result<u64> {
+    const COPY_CHUNK_SIZE: usize = 1024 * 1024;
+    let mut buf = vec![0u8; COPY_CHUNK_SIZE];
+    let mut total = 0u64;
+    loop {
+        let n = src.read(&mut buf)?;
+        if n == 0 {
+            return Ok(total);
+        }
+        dst.write_all(&buf[..n])?;
+        total += n as u64;
+    }
+}
+
+fn checked_usize_u64(value: u64, message: &'static str) -> Result<usize> {
+    usize::try_from(value).map_err(|_| Error::AacParse {
+        message: message.into(),
+    })
 }

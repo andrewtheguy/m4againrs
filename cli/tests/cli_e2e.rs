@@ -7,6 +7,7 @@
 //! end-to-end coverage so the library remains testable in isolation.
 
 use std::fs;
+use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -76,6 +77,24 @@ fn ffmpeg_generate_tone(path: &Path) {
         .status()
         .expect("failed to spawn ffmpeg — is it installed?");
     assert!(status.success(), "ffmpeg failed to generate AAC fixture");
+}
+
+fn ffmpeg_remux_faststart(src: &Path, dst: &Path) {
+    let status = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-nostdin",
+            "-v",
+            "error",
+            "-y",
+            "-i",
+        ])
+        .arg(src)
+        .args(["-c", "copy", "-movflags", "+faststart"])
+        .arg(dst)
+        .status()
+        .expect("failed to spawn ffmpeg for faststart remux");
+    assert!(status.success(), "ffmpeg failed to remux to faststart");
 }
 
 fn ffmpeg_decode_check(path: &Path) {
@@ -355,5 +374,160 @@ fn cli_round_trip_zero_steps_after_combining_positive_and_negative_decodes() {
         tag.contains("gain_steps=-5"),
         "expected most-recent gain step to be recorded: {tag}"
     );
+}
+
+#[test]
+fn cli_streaming_api_matches_writer_api_byte_for_byte() {
+    // Generate a fresh AAC tone with ffmpeg, remux to faststart, then assert
+    // the streaming API and the seekable writer API produce byte-identical
+    // output for the same input. Also pipe the streaming output through
+    // ffmpeg to confirm it decodes cleanly.
+    let tmp = TestDir::new("cli-streaming-equality");
+    let raw = tmp.join("raw.m4a");
+    let faststart = tmp.join("faststart.m4a");
+    let streaming_out = tmp.join("streaming.m4a");
+    ffmpeg_generate_tone(&raw);
+    ffmpeg_remux_faststart(&raw, &faststart);
+
+    let bytes = fs::read(&faststart).expect("failed to read faststart fixture");
+
+    let mut writer_out = Vec::new();
+    let writer_modified =
+        m4againrs::aac_apply_gain_to_writer(&mut Cursor::new(&bytes), &mut writer_out, 4)
+            .expect("writer API should accept faststart input");
+
+    let mut stream_out = Vec::new();
+    let stream_modified =
+        m4againrs::aac_apply_gain_streaming(&mut Cursor::new(&bytes), &mut stream_out, 4)
+            .expect("streaming API should accept faststart input");
+
+    assert!(stream_modified > 0);
+    assert_eq!(writer_modified, stream_modified);
+    assert_eq!(writer_out, stream_out, "streaming output must equal writer output byte-for-byte");
+
+    fs::write(&streaming_out, &stream_out).expect("failed to write streaming output");
+    ffmpeg_decode_check(&streaming_out);
+}
+
+#[test]
+fn cli_stdin_input_to_file_output_writes_decodable_m4a() {
+    let tmp = TestDir::new("cli-stdin-file");
+    let raw = tmp.join("raw.m4a");
+    let faststart = tmp.join("faststart.m4a");
+    let dst = tmp.join("out.m4a");
+    ffmpeg_generate_tone(&raw);
+    ffmpeg_remux_faststart(&raw, &faststart);
+    let bytes = fs::read(&faststart).expect("failed to read faststart fixture");
+
+    let mut child = Command::new(BIN)
+        .args(["-", dst.to_str().unwrap(), "3"])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn m4againrs");
+    child
+        .stdin
+        .take()
+        .expect("missing piped stdin")
+        .write_all(&bytes)
+        .expect("failed to write to cli stdin");
+    let out = child.wait_with_output().expect("cli wait failed");
+    assert!(
+        out.status.success(),
+        "cli exited non-zero: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let tag = ffprobe_m4ag_tag(&dst);
+    assert!(
+        tag.contains("gain_steps=3"),
+        "ffprobe output missing expected M4AG tag: {tag}"
+    );
+    ffmpeg_decode_check(&dst);
+}
+
+#[test]
+fn cli_stdin_to_stdout_round_trips_through_pipe() {
+    let tmp = TestDir::new("cli-stdin-stdout");
+    let raw = tmp.join("raw.m4a");
+    let faststart = tmp.join("faststart.m4a");
+    ffmpeg_generate_tone(&raw);
+    ffmpeg_remux_faststart(&raw, &faststart);
+    let bytes = fs::read(&faststart).expect("failed to read faststart fixture");
+
+    let mut child = Command::new(BIN)
+        .args(["-", "-", "2"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn m4againrs");
+    child
+        .stdin
+        .take()
+        .expect("missing piped stdin")
+        .write_all(&bytes)
+        .expect("failed to write to cli stdin");
+    let out = child.wait_with_output().expect("cli wait failed");
+    assert!(
+        out.status.success(),
+        "cli exited non-zero: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.stdout.is_empty(), "cli stdout was empty");
+
+    let captured = tmp.join("captured.m4a");
+    fs::write(&captured, &out.stdout).expect("failed to write captured stdout");
+    let tag = ffprobe_m4ag_tag(&captured);
+    assert!(
+        tag.contains("gain_steps=2"),
+        "ffprobe output missing expected M4AG tag: {tag}"
+    );
+    ffmpeg_decode_check(&captured);
+}
+
+#[test]
+fn cli_stdin_input_rejects_non_faststart() {
+    let tmp = TestDir::new("cli-stdin-non-faststart");
+    let src = tmp.join("non_faststart.m4a");
+    ffmpeg_generate_tone(&src); // ffmpeg's default is non-faststart
+    let bytes = fs::read(&src).expect("failed to read fixture");
+
+    let mut child = Command::new(BIN)
+        .args(["-", "-", "2"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn m4againrs");
+    let _ = child
+        .stdin
+        .take()
+        .expect("missing piped stdin")
+        .write_all(&bytes); // ignore broken-pipe if cli exits early
+    let out = child.wait_with_output().expect("cli wait failed");
+
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("not faststart"),
+        "stderr should mention faststart: {stderr}"
+    );
+}
+
+#[test]
+fn cli_streaming_api_rejects_non_faststart_input() {
+    // ffmpeg's default AAC writer produces non-faststart output (mdat then
+    // moov). Confirm the streaming API rejects it cleanly.
+    let tmp = TestDir::new("cli-streaming-non-faststart");
+    let src = tmp.join("non_faststart.m4a");
+    ffmpeg_generate_tone(&src);
+
+    let bytes = fs::read(&src).expect("failed to read non-faststart fixture");
+    let mut dst = Vec::new();
+    let err = m4againrs::aac_apply_gain_streaming(&mut Cursor::new(&bytes), &mut dst, 2)
+        .expect_err("streaming API should reject non-faststart input");
+
+    assert!(matches!(err, m4againrs::Error::NonFaststartInput));
 }
 

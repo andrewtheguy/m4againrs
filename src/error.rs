@@ -14,6 +14,9 @@ pub enum Error {
     #[error("no moov box found")]
     NoMoovBox,
 
+    #[error("input is not faststart (mdat before moov); use aac_apply_gain_to_writer for a seekable rewrite")]
+    NonFaststartInput,
+
     #[error("no AAC audio track found")]
     NoAacTrack,
 
