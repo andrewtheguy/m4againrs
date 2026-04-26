@@ -82,7 +82,7 @@ fn cli_apply_gain_to_fixture(test_name: &str, fixture: &str, gain_steps: i32) {
         tag.contains(&expected),
         "ffprobe output missing expected M4AG tag for {fixture}: {tag}"
     );
-    ffmpeg_decode_check(&dst);
+    ffmpeg_decode_check(&src, &dst);
 }
 
 fn run_cli(args: &[&str]) -> Output {
@@ -133,25 +133,75 @@ fn ffmpeg_remux_faststart(src: &Path, dst: &Path) {
     assert!(status.success(), "ffmpeg failed to remux to faststart");
 }
 
-fn ffmpeg_decode_check(path: &Path) {
+/// Assert ffmpeg decodes both `src` and `dst` without exiting non-zero, and
+/// that no normalized error line appears in `dst`'s stderr that wasn't already
+/// present in `src`'s stderr. The right invariant for a gain rewrite is "no
+/// NEW errors", not "no errors at all" — a real-world capture may already
+/// trip ffmpeg warnings that have nothing to do with us.
+fn ffmpeg_decode_check(src: &Path, dst: &Path) {
+    let src_errors = ffmpeg_decode_stderr(src);
+    let dst_errors = ffmpeg_decode_stderr(dst);
+
+    let baseline: std::collections::HashSet<&String> = src_errors.iter().collect();
+    let new: Vec<&String> = dst_errors.iter().filter(|l| !baseline.contains(l)).collect();
+    assert!(
+        new.is_empty(),
+        "gain rewrite of {} → {} introduced ffmpeg decode error(s) not present in source:\n{}\n(source baseline: {:?})",
+        src.display(),
+        dst.display(),
+        new.iter().map(|l| format!("  + {l}")).collect::<Vec<_>>().join("\n"),
+        src_errors,
+    );
+}
+
+fn ffmpeg_decode_stderr(path: &Path) -> Vec<String> {
     let output = Command::new("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-nostdin",
-            "-v",
-            "error",
-            "-i",
-        ])
+        .args(["-hide_banner", "-nostdin", "-v", "error", "-i"])
         .arg(path)
         .args(["-f", "null", "-"])
         .output()
         .expect("failed to spawn ffmpeg for decode check");
     assert!(
         output.status.success(),
-        "ffmpeg failed to decode {}: {}",
+        "ffmpeg failed to decode {} (exit {:?}): {}",
         path.display(),
+        output.status.code(),
         String::from_utf8_lossy(&output.stderr)
     );
+    String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .map(normalize_ffmpeg_error_line)
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+/// Strip ffmpeg's "[codec @ 0xADDR]" prefix and collapse runs of ASCII digits
+/// to a single 'N'. The address varies between processes; numeric tokens
+/// (sample/byte/packet indices) shift after a gain rewrite moves moov/mdat.
+fn normalize_ffmpeg_error_line(line: &str) -> String {
+    let trimmed = line.trim();
+    let after_prefix = if trimmed.starts_with('[') {
+        trimmed
+            .find(']')
+            .map(|i| trimmed[i + 1..].trim_start())
+            .unwrap_or(trimmed)
+    } else {
+        trimmed
+    };
+    let mut out = String::with_capacity(after_prefix.len());
+    let mut last_was_digit = false;
+    for c in after_prefix.chars() {
+        if c.is_ascii_digit() {
+            if !last_was_digit {
+                out.push('N');
+            }
+            last_was_digit = true;
+        } else {
+            out.push(c);
+            last_was_digit = false;
+        }
+    }
+    out
 }
 
 fn ffprobe_format_tag(path: &Path, key: &str) -> String {
@@ -355,7 +405,7 @@ fn cli_writes_destination_file_with_gain_metadata_and_ffmpeg_decodes() {
         tag.contains("TAG:M4AG=m4againrs version=1 gain_steps=2 gain_step_db=1.5"),
         "ffprobe output missing expected M4AG tag: {tag}"
     );
-    ffmpeg_decode_check(&dst);
+    ffmpeg_decode_check(&src, &dst);
 }
 
 #[test]
@@ -382,7 +432,7 @@ fn cli_negative_gain_writes_destination_with_metadata() {
         tag.contains("gain_steps=-3"),
         "ffprobe output missing expected M4AG tag: {tag}"
     );
-    ffmpeg_decode_check(&dst);
+    ffmpeg_decode_check(&src, &dst);
 }
 
 #[test]
@@ -406,7 +456,7 @@ fn cli_streams_to_stdout_when_destination_is_dash() {
         tag.contains("gain_steps=4"),
         "ffprobe output missing expected M4AG tag: {tag}"
     );
-    ffmpeg_decode_check(&captured);
+    ffmpeg_decode_check(&src, &captured);
 }
 
 #[test]
@@ -474,7 +524,9 @@ fn cli_round_trip_zero_steps_after_combining_positive_and_negative_decodes() {
     ]);
     assert!(down.status.success());
 
-    ffmpeg_decode_check(&restored);
+    // Diff against the original src — proves two consecutive gain ops don't
+    // accumulate decode errors relative to the untouched source.
+    ffmpeg_decode_check(&src, &restored);
     let tag = ffprobe_m4ag_tag(&restored);
     assert!(
         tag.contains("gain_steps=-5"),
@@ -512,7 +564,7 @@ fn cli_streaming_api_matches_writer_api_byte_for_byte() {
     assert_eq!(writer_out, stream_out, "streaming output must equal writer output byte-for-byte");
 
     fs::write(&streaming_out, &stream_out).expect("failed to write streaming output");
-    ffmpeg_decode_check(&streaming_out);
+    ffmpeg_decode_check(&faststart, &streaming_out);
 }
 
 #[test]
@@ -549,7 +601,7 @@ fn cli_stdin_input_to_file_output_writes_decodable_m4a() {
         tag.contains("gain_steps=3"),
         "ffprobe output missing expected M4AG tag: {tag}"
     );
-    ffmpeg_decode_check(&dst);
+    ffmpeg_decode_check(&faststart, &dst);
 }
 
 #[test]
@@ -589,7 +641,7 @@ fn cli_stdin_to_stdout_round_trips_through_pipe() {
         tag.contains("gain_steps=2"),
         "ffprobe output missing expected M4AG tag: {tag}"
     );
-    ffmpeg_decode_check(&captured);
+    ffmpeg_decode_check(&faststart, &captured);
 }
 
 #[test]
@@ -659,8 +711,8 @@ fn cli_decodes_aac_main_fixture_after_gain() {
 fn cli_streaming_decodes_he_aacv2_faststart_after_gain() {
     let tmp = TestDir::new("cli-stream-he-aacv2-faststart");
     let captured = tmp.join("captured.m4a");
-    let bytes = fs::read(testdata_path("he_aacv2_faststart.m4a"))
-        .expect("failed to read HE-AACv2 faststart fixture");
+    let fixture_src = testdata_path("he_aacv2_faststart.m4a");
+    let bytes = fs::read(&fixture_src).expect("failed to read HE-AACv2 faststart fixture");
 
     let mut child = Command::new(BIN)
         .args(["-", "-", "--gain-steps", "3"])
@@ -689,7 +741,7 @@ fn cli_streaming_decodes_he_aacv2_faststart_after_gain() {
         tag.contains("gain_steps=3"),
         "ffprobe output missing expected M4AG tag: {tag}"
     );
-    ffmpeg_decode_check(&captured);
+    ffmpeg_decode_check(&fixture_src, &captured);
 }
 
 #[test]
@@ -774,7 +826,7 @@ fn cli_preserves_foreign_description_tag_added_by_ffmpeg() {
         m4ag.contains("TAG:M4AG=m4againrs version=1 gain_steps=2 gain_step_db=1.5"),
         "expected M4AG tag missing: {m4ag}"
     );
-    ffmpeg_decode_check(&dst);
+    ffmpeg_decode_check(&described, &dst);
 }
 
 #[test]
@@ -829,7 +881,7 @@ fn cli_rewrites_chunk_offsets_when_moov_grows_on_faststart_input() {
             "sample {idx} offset not shifted by moov growth"
         );
     }
-    ffmpeg_decode_check(&dst);
+    ffmpeg_decode_check(&faststart, &dst);
 }
 
 #[test]
@@ -878,7 +930,7 @@ if(lt(mod(t,0.25),0.018),0.95*sin(2*PI*3600*t),0.04*sin(2*PI*660*t))'\
         "expected one gain patch per channel per sample (CPE element should yield 2 patches)"
     );
 
-    ffmpeg_decode_check(&dst);
+    ffmpeg_decode_check(&src, &dst);
 }
 
 // ---------------------------------------------------------------------------
