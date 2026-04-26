@@ -292,6 +292,56 @@ fn streaming_api_patches_he_aacv2_faststart_fixture() {
 }
 
 #[test]
+fn file_api_applies_gain_to_aac_lc_51_fixture() {
+    // 5.1 layout exercises the ID_SCE (front center) and ID_LFE branches in
+    // parse_raw_data_block, which are not hit by any of the stereo fixtures.
+    let tmp = TestDir::new("file-api-aac-lc-51");
+    let src = tmp.join("in.m4a");
+    let dst = tmp.join("out.m4a");
+    copy_fixture(&testdata_path("aac_lc_51.m4a"), &src);
+    let src_bytes = fs::read(&src).expect("failed to read 5.1 fixture");
+    let src_ranges = sample_byte_ranges(&src_bytes);
+
+    let modified = m4againrs::aac_apply_gain_file(&src, &dst, 2)
+        .expect("gain application should succeed for AAC LC 5.1");
+
+    assert!(modified > 0);
+    let dst_bytes = fs::read(&dst).expect("failed to read 5.1 output");
+    let dst_ranges = sample_byte_ranges(&dst_bytes);
+    assert_same_sample_sizes(&src_ranges, &dst_ranges);
+    assert!(
+        sample_payloads_differ(&src_bytes, &dst_bytes, &src_ranges, &dst_ranges),
+        "no AAC sample bytes changed for 5.1 fixture"
+    );
+}
+
+#[test]
+fn file_api_applies_gain_to_short_window_fixture() {
+    // The transient fixture forces the encoder into EIGHT_SHORT_SEQUENCE for a
+    // significant fraction of frames (verified out-of-band: ~24% short windows).
+    // Without it, the !long_win branches in parse_ics_info / parse_section_data
+    // / spectral parsing are dead in our test suite.
+    let tmp = TestDir::new("file-api-aac-lc-transient");
+    let src = tmp.join("in.m4a");
+    let dst = tmp.join("out.m4a");
+    copy_fixture(&testdata_path("aac_lc_transient.m4a"), &src);
+    let src_bytes = fs::read(&src).expect("failed to read transient fixture");
+    let src_ranges = sample_byte_ranges(&src_bytes);
+
+    let modified = m4againrs::aac_apply_gain_file(&src, &dst, 2)
+        .expect("gain application should succeed for short-window content");
+
+    assert!(modified > 0);
+    let dst_bytes = fs::read(&dst).expect("failed to read transient output");
+    let dst_ranges = sample_byte_ranges(&dst_bytes);
+    assert_same_sample_sizes(&src_ranges, &dst_ranges);
+    assert!(
+        sample_payloads_differ(&src_bytes, &dst_bytes, &src_ranges, &dst_ranges),
+        "no AAC sample bytes changed for transient fixture"
+    );
+}
+
+#[test]
 fn streaming_api_matches_writer_api_for_he_aacv2_faststart_input() {
     let bytes = fs::read(testdata_path("he_aacv2_faststart.m4a"))
         .expect("failed to read HE-AACv2 faststart fixture");
