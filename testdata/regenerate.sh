@@ -3,13 +3,38 @@
 # tests (tests/file_api.rs) and the Python binding tests
 # (python/tests/test_python_bindings.py).
 #
-#   tagged_tone.m4a    — short AAC tone with rich iTunes metadata; used to
-#                        prove gain adjustment preserves container metadata
-#                        byte-for-byte.
-#   test_faststart.m4a — faststart (moov-before-mdat) remux of test.m4a;
-#                        required by the streaming-input tests.
+#   tagged_tone.m4a        — short AAC tone with rich iTunes metadata; used to
+#                            prove gain adjustment preserves container metadata
+#                            byte-for-byte.
+#   test_faststart.m4a     — faststart (moov-before-mdat) remux of test.m4a;
+#                            required by the streaming-input tests.
+#   he_aacv2_faststart.m4a — faststart remux of he_aacv2.m4a; used by the
+#                            HE-AACv2 streaming-input tests.
+#   aac_lc_51.m4a          — 5.1 AAC LC tone (six independent sine channels);
+#                            exercises the ID_SCE (front center) and ID_LFE
+#                            element branches in the raw_data_block parser.
+#   aac_lc_transient.m4a   — mono AAC LC with periodic 1 kHz bursts; the
+#                            encoder switches to EIGHT_SHORT_SEQUENCE on the
+#                            attacks, exercising the short-window paths in
+#                            ics_info / section_data / spectral parsing.
+#   bear_he_aac_v1.m4a            — implicit-signalling HE-AAC v1 (SBR, no PS);
+#                                   ASC reports LC@24 kHz/stereo, SBR detected
+#                                   in the bitstream at decode time.
+#   bear_he_aac_v2_implicit.m4a   — implicit-signalling HE-AAC v2 (SBR + PS);
+#                                   ASC reports LC@24 kHz/mono, SBR+PS detected
+#                                   in the bitstream. Distinct from
+#                                   he_aacv2.m4a which uses explicit signalling.
+#   bear_aac_main.m4a             — AAC Main profile (AOT=1) at 48 kHz stereo;
+#                                   covers the non-LC AOT path.
 #
-# test.m4a itself is committed source data and is not regenerated.
+# All three bear_*.m4a fixtures are remuxes of the public Photoprism samples
+# at https://dl.photoprism.app/samples/Formats/Audio/AAC/ — see the curl/ffmpeg
+# recipe at the bottom of this script.
+#
+# test.m4a and he_aacv2.m4a are committed source data and are not regenerated.
+# he_aacv2.m4a was sliced (with `-c copy`) from a longer real-world HE-AACv2
+# (Parametric Stereo) capture to exercise the gain rewriter against an
+# AAC profile that goes beyond plain LC.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -29,5 +54,46 @@ ffmpeg -hide_banner -loglevel error \
 ffmpeg -hide_banner -loglevel error \
     -i test.m4a -c copy -movflags +faststart -y test_faststart.m4a
 
+ffmpeg -hide_banner -loglevel error \
+    -i he_aacv2.m4a -c copy -movflags +faststart -y he_aacv2_faststart.m4a
+
+ffmpeg -hide_banner -loglevel error \
+    -filter_complex "\
+sine=frequency=200:duration=2:sample_rate=48000[FL];\
+sine=frequency=300:duration=2:sample_rate=48000[FR];\
+sine=frequency=400:duration=2:sample_rate=48000[FC];\
+sine=frequency=80:duration=2:sample_rate=48000[LFE];\
+sine=frequency=500:duration=2:sample_rate=48000[BL];\
+sine=frequency=600:duration=2:sample_rate=48000[BR];\
+[FL][FR][FC][LFE][BL][BR]amerge=inputs=6,channelmap=channel_layout=5.1[a]" \
+    -map "[a]" -c:a aac -b:a 192k -y aac_lc_51.m4a
+
+ffmpeg -hide_banner -loglevel error \
+    -f lavfi -i "aevalsrc=exprs='if(lt(mod(n\,4096)\,200)\,0.9*sin(2*PI*1000*n/44100)\,0)':d=2:s=44100:c=mono" \
+    -c:a aac -b:a 96k -y aac_lc_transient.m4a
+
+# Photoprism public AAC samples — fetched as ADTS, remuxed to M4A with -c copy
+# to preserve the original AAC bitstream. We rely on the upstream files staying
+# byte-stable; if they ever change we'll see a fixture diff in git.
+PHOTOPRISM_BASE="https://dl.photoprism.app/samples/Formats/Audio/AAC"
+for spec in \
+    "bear-audio-implicit-he-aac-v1.aac:bear_he_aac_v1.m4a" \
+    "bear-audio-implicit-he-aac-v2.aac:bear_he_aac_v2_implicit.m4a" \
+    "bear-audio-main-aac.aac:bear_aac_main.m4a"
+do
+    src_name="${spec%%:*}"
+    dst_name="${spec##*:}"
+    tmp_src="$(mktemp --suffix=.aac)"
+    curl -sSL --fail -o "$tmp_src" "$PHOTOPRISM_BASE/$src_name"
+    ffmpeg -hide_banner -loglevel error -i "$tmp_src" -c copy -y "$dst_name"
+    rm -f "$tmp_src"
+done
+
 echo "generated: $(pwd)/tagged_tone.m4a"
 echo "generated: $(pwd)/test_faststart.m4a"
+echo "generated: $(pwd)/he_aacv2_faststart.m4a"
+echo "generated: $(pwd)/aac_lc_51.m4a"
+echo "generated: $(pwd)/aac_lc_transient.m4a"
+echo "generated: $(pwd)/bear_he_aac_v1.m4a"
+echo "generated: $(pwd)/bear_he_aac_v2_implicit.m4a"
+echo "generated: $(pwd)/bear_aac_main.m4a"
