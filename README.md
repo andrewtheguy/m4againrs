@@ -73,21 +73,22 @@ Build and use the standalone binary:
 
 ```bash
 cargo build --release -p m4againrs-cli
-./target/release/m4againrs <input.m4a|-> <output.m4a|-> <gain_steps>
+./target/release/m4againrs <input.m4a|-> <output.m4a|-> --gain-steps <N>
 ```
 
-Three positional arguments — input path, output path, signed integer step
-count. One step is 1.5 dB. The source file is never overwritten, and a
-custom `M4AG` MP4 metadata tag is written to the destination. Use `-` as
-the input path to read from stdin, and/or as the output path to stream the
-modified M4A to stdout. Stdin input requires faststart (`moov`-before-`mdat`)
-M4A; pre-process with `ffmpeg -movflags +faststart` if needed.
+Two positional arguments — input path and output path — plus the required
+`--gain-steps <N>` flag. `N` is a signed integer; one step is 1.5 dB. The
+source file is never overwritten, and a custom `M4AG` MP4 metadata tag is
+written to the destination. Use `-` as the input path to read from stdin,
+and/or as the output path to stream the modified M4A to stdout. Stdin input
+requires faststart (`moov`-before-`mdat`) M4A; pre-process with
+`ffmpeg -movflags +faststart` if needed.
 
 ```bash
-m4againrs track.m4a track_louder.m4a 2     # +3.0 dB
-m4againrs track.m4a track_softer.m4a -2    # -3.0 dB
-m4againrs track.m4a - 2 > track_louder.m4a # write to stdout
-cat track.m4a | m4againrs - - 2 | mpv -    # full pipe (stdin → stdout)
+m4againrs track.m4a track_louder.m4a --gain-steps 2     # +3.0 dB
+m4againrs track.m4a track_softer.m4a --gain-steps -2    # -3.0 dB
+m4againrs track.m4a - --gain-steps 2 > track_louder.m4a # write to stdout
+cat track.m4a | m4againrs - - --gain-steps 2 | mpv -    # full pipe (stdin → stdout)
 ```
 
 ## Python bindings

@@ -160,8 +160,9 @@ fn cli_exits_2_when_too_many_args() {
     let out = run_cli(&[
         src.to_str().unwrap(),
         dst.to_str().unwrap(),
-        "2",
         "extra",
+        "--gain-steps",
+        "2",
     ]);
     assert_eq!(out.status.code(), Some(2));
     assert!(!dst.exists(), "destination should not be created");
@@ -174,11 +175,16 @@ fn cli_exits_2_when_gain_steps_not_an_integer() {
     let dst = tmp.join("out.m4a");
     ffmpeg_generate_tone(&src);
 
-    let out = run_cli(&[src.to_str().unwrap(), dst.to_str().unwrap(), "loud"]);
+    let out = run_cli(&[
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+        "--gain-steps",
+        "loud",
+    ]);
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("must be an integer"),
+        stderr.contains("invalid value") && stderr.contains("--gain-steps"),
         "stderr was: {stderr}"
     );
     assert!(!dst.exists(), "destination should not be created");
@@ -191,7 +197,12 @@ fn cli_fails_on_zero_gain_steps() {
     let dst = tmp.join("out.m4a");
     ffmpeg_generate_tone(&src);
 
-    let out = run_cli(&[src.to_str().unwrap(), dst.to_str().unwrap(), "0"]);
+    let out = run_cli(&[
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+        "--gain-steps",
+        "0",
+    ]);
     assert_eq!(out.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("gain_steps"), "stderr was: {stderr}");
@@ -205,7 +216,12 @@ fn cli_fails_when_source_equals_destination() {
     ffmpeg_generate_tone(&src);
     let before = fs::read(&src).expect("failed to read fixture");
 
-    let out = run_cli(&[src.to_str().unwrap(), src.to_str().unwrap(), "2"]);
+    let out = run_cli(&[
+        src.to_str().unwrap(),
+        src.to_str().unwrap(),
+        "--gain-steps",
+        "2",
+    ]);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         fs::read(&src).expect("failed to reread source"),
@@ -220,7 +236,12 @@ fn cli_fails_on_nonexistent_input() {
     let src = tmp.join("does-not-exist.m4a");
     let dst = tmp.join("out.m4a");
 
-    let out = run_cli(&[src.to_str().unwrap(), dst.to_str().unwrap(), "2"]);
+    let out = run_cli(&[
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+        "--gain-steps",
+        "2",
+    ]);
     assert_eq!(out.status.code(), Some(1));
     assert!(!dst.exists(), "destination should not be created");
 }
@@ -232,7 +253,12 @@ fn cli_fails_on_non_mp4_input() {
     let dst = tmp.join("out.m4a");
     fs::write(&src, b"not an mp4 at all").expect("failed to write garbage fixture");
 
-    let out = run_cli(&[src.to_str().unwrap(), dst.to_str().unwrap(), "2"]);
+    let out = run_cli(&[
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+        "--gain-steps",
+        "2",
+    ]);
     assert_eq!(out.status.code(), Some(1));
     assert!(!dst.exists(), "destination should not be created");
 }
@@ -245,7 +271,12 @@ fn cli_writes_destination_file_with_gain_metadata_and_ffmpeg_decodes() {
     ffmpeg_generate_tone(&src);
     let src_before = fs::read(&src).expect("failed to read source");
 
-    let out = run_cli(&[src.to_str().unwrap(), dst.to_str().unwrap(), "2"]);
+    let out = run_cli(&[
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+        "--gain-steps",
+        "2",
+    ]);
     assert!(
         out.status.success(),
         "cli failed: stderr={}",
@@ -274,7 +305,12 @@ fn cli_negative_gain_writes_destination_with_metadata() {
     let dst = tmp.join("out.m4a");
     ffmpeg_generate_tone(&src);
 
-    let out = run_cli(&[src.to_str().unwrap(), dst.to_str().unwrap(), "-3"]);
+    let out = run_cli(&[
+        src.to_str().unwrap(),
+        dst.to_str().unwrap(),
+        "--gain-steps",
+        "-3",
+    ]);
     assert!(
         out.status.success(),
         "cli failed: stderr={}",
@@ -296,7 +332,7 @@ fn cli_streams_to_stdout_when_destination_is_dash() {
     let captured = tmp.join("from-stdout.m4a");
     ffmpeg_generate_tone(&src);
 
-    let out = run_cli(&[src.to_str().unwrap(), "-", "4"]);
+    let out = run_cli(&[src.to_str().unwrap(), "-", "--gain-steps", "4"]);
     assert!(
         out.status.success(),
         "cli failed: stderr={}",
@@ -320,7 +356,7 @@ fn cli_stdout_output_round_trips_through_pipe() {
     ffmpeg_generate_tone(&src);
 
     let mut child = Command::new(BIN)
-        .args([src.to_str().unwrap(), "-", "2"])
+        .args([src.to_str().unwrap(), "-", "--gain-steps", "2"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -363,9 +399,19 @@ fn cli_round_trip_zero_steps_after_combining_positive_and_negative_decodes() {
     let restored = tmp.join("restored.m4a");
     ffmpeg_generate_tone(&src);
 
-    let up = run_cli(&[src.to_str().unwrap(), louder.to_str().unwrap(), "5"]);
+    let up = run_cli(&[
+        src.to_str().unwrap(),
+        louder.to_str().unwrap(),
+        "--gain-steps",
+        "5",
+    ]);
     assert!(up.status.success());
-    let down = run_cli(&[louder.to_str().unwrap(), restored.to_str().unwrap(), "-5"]);
+    let down = run_cli(&[
+        louder.to_str().unwrap(),
+        restored.to_str().unwrap(),
+        "--gain-steps",
+        "-5",
+    ]);
     assert!(down.status.success());
 
     ffmpeg_decode_check(&restored);
@@ -420,7 +466,7 @@ fn cli_stdin_input_to_file_output_writes_decodable_m4a() {
     let bytes = fs::read(&faststart).expect("failed to read faststart fixture");
 
     let mut child = Command::new(BIN)
-        .args(["-", dst.to_str().unwrap(), "3"])
+        .args(["-", dst.to_str().unwrap(), "--gain-steps", "3"])
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -456,7 +502,7 @@ fn cli_stdin_to_stdout_round_trips_through_pipe() {
     let bytes = fs::read(&faststart).expect("failed to read faststart fixture");
 
     let mut child = Command::new(BIN)
-        .args(["-", "-", "2"])
+        .args(["-", "-", "--gain-steps", "2"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -494,7 +540,7 @@ fn cli_stdin_input_rejects_non_faststart() {
     let bytes = fs::read(&src).expect("failed to read fixture");
 
     let mut child = Command::new(BIN)
-        .args(["-", "-", "2"])
+        .args(["-", "-", "--gain-steps", "2"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

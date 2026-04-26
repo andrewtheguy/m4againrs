@@ -98,8 +98,78 @@ jobs:
           path: dist/*.whl
           if-no-files-found: error
 
+  build-cli:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runs-on: ubuntu-latest
+            target-triple: x86_64-unknown-linux-gnu
+          - runs-on: ubuntu-24.04-arm
+            target-triple: aarch64-unknown-linux-gnu
+          - runs-on: macos-latest
+            target-triple: aarch64-apple-darwin
+          - runs-on: windows-latest
+            target-triple: x86_64-pc-windows-msvc
+
+    runs-on: ${{ matrix.runs-on }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build CLI binary
+        run: cargo build --release -p m4againrs-cli
+
+      - name: Package CLI binary (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          TARGET_TRIPLE: ${{ matrix.target-triple }}
+        run: |
+          mkdir -p dist
+          version="${RELEASE_TAG#v}"
+          stem="m4againrs-${version}-${TARGET_TRIPLE}"
+          staging="dist/${stem}"
+          mkdir -p "$staging"
+          cp target/release/m4againrs "$staging/"
+          cp README.md "$staging/" 2>/dev/null || true
+          tar -czf "dist/${stem}.tar.gz" -C dist "$stem"
+          rm -rf "$staging"
+
+      - name: Package CLI binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          TARGET_TRIPLE: ${{ matrix.target-triple }}
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $version = $env:RELEASE_TAG -replace '^v',''
+          $stem = "m4againrs-$version-$env:TARGET_TRIPLE"
+          $staging = "dist/$stem"
+          New-Item -ItemType Directory -Force $staging | Out-Null
+          Copy-Item "target/release/m4againrs.exe" $staging
+          if (Test-Path README.md) { Copy-Item README.md $staging }
+          Compress-Archive -Path $staging -DestinationPath "dist/$stem.zip"
+          Remove-Item -Recurse -Force $staging
+
+      - name: Upload CLI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.target-triple }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
   create-release:
-    needs: [prepare, build-wheel]
+    needs: [prepare, build-wheel, build-cli]
     runs-on: ubuntu-latest
 
     steps:
@@ -107,7 +177,13 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           pattern: python-wheel-*
-          path: release-assets
+          path: release-assets/wheels
+
+      - name: Download CLI artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cli-*
+          path: release-assets/cli
 
       - name: Create GitHub release
         env:
@@ -115,9 +191,19 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         run: |
-          mapfile -d '' assets < <(find release-assets -type f -name '*.whl' -print0 | sort -z)
+          mapfile -d '' wheels < <(find release-assets/wheels -type f -name '*.whl' -print0 | sort -z)
+          mapfile -d '' bins < <(find release-assets/cli -type f \( -name '*.tar.gz' -o -name '*.zip' \) -print0 | sort -z)
+          assets=("${wheels[@]}" "${bins[@]}")
           if [ "${#assets[@]}" -eq 0 ]; then
-            echo "No wheel assets found under release-assets" >&2
+            echo "No release assets found under release-assets/" >&2
+            exit 1
+          fi
+          if [ "${#wheels[@]}" -eq 0 ]; then
+            echo "No wheel assets found" >&2
+            exit 1
+          fi
+          if [ "${#bins[@]}" -eq 0 ]; then
+            echo "No CLI binary assets found" >&2
             exit 1
           fi
 
