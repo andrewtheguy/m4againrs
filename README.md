@@ -156,5 +156,7 @@ The Python binding tests load the built extension from the workspace
 `target/debug` or `target/release`; they do not import an installed
 `site-packages` copy.
 
-The `python/testdata/tagged_tone.m4a` fixture is committed; to regenerate it
-with ffmpeg, run `python/testdata/regenerate.sh`.
+The `testdata/` fixtures are shared by both the Rust integration tests and
+the Python binding tests. `tagged_tone.m4a` and `test_faststart.m4a` are
+committed and can be regenerated with `testdata/regenerate.sh` (requires
+ffmpeg). `test.m4a` is committed source data.

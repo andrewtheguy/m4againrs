@@ -246,7 +246,6 @@ fn copy_fixture(src: &Path, dst: &Path) {
 
 fn testdata_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("python")
         .join("testdata")
         .join(name)
 }
