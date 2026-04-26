@@ -1477,7 +1477,7 @@ pub(crate) fn apply_gain_plan_streaming<R: Read, W: Write>(
         let Some(header) = read_box_header_streaming(src)? else {
             break;
         };
-        let header_bytes = encode_box_header(&header);
+        let header_bytes = encode_box_header(&header)?;
         let content_size = header.content_size();
         let body_start = input_cursor + header.header_size as u64;
 
@@ -1530,6 +1530,7 @@ pub(crate) fn apply_gain_plan_streaming<R: Read, W: Write>(
                     sample_rate,
                     sample_idx: 0,
                     parse_warnings: 0,
+                    samples_parsed_ok: 0,
                 });
                 input_cursor += old_moov.len() as u64;
             }
@@ -1565,7 +1566,7 @@ pub(crate) fn apply_gain_plan_streaming<R: Read, W: Write>(
 
     dst.flush()?;
 
-    if modified == 0 && state.parse_warnings > 0 && state.sample_table.is_empty() {
+    if state.samples_parsed_ok == 0 && state.parse_warnings > 0 {
         return Err(Error::AacParseFailure {
             warnings: state.parse_warnings,
         });
@@ -1579,6 +1580,7 @@ struct StreamingState {
     sample_rate: u32,
     sample_idx: usize,
     parse_warnings: u32,
+    samples_parsed_ok: usize,
 }
 
 /// Stream the body of a post-moov top-level box, intercepting any AAC samples
@@ -1664,6 +1666,7 @@ fn stream_box_body<R: Read, W: Write>(
         locs.clear();
         match parse_sample_locations(&sample_buf, state.sample_rate, entry_offset, &mut locs) {
             Ok(()) => {
+                state.samples_parsed_ok += 1;
                 modified_here += apply_gain_to_sample_buffer(
                     &mut sample_buf,
                     &locs,
@@ -1746,23 +1749,26 @@ fn read_box_header_streaming<R: Read>(src: &mut R) -> Result<Option<mp4::BoxHead
     }))
 }
 
-fn encode_box_header(header: &mp4::BoxHeader) -> Vec<u8> {
+fn encode_box_header(header: &mp4::BoxHeader) -> Result<Vec<u8>> {
     if header.header_size == 16 {
         let mut out = Vec::with_capacity(16);
         out.extend_from_slice(&1u32.to_be_bytes());
         out.extend_from_slice(&header.box_type.to_be_bytes());
         out.extend_from_slice(&header.size.to_be_bytes());
-        out
+        Ok(out)
     } else {
         let mut out = Vec::with_capacity(8);
         let size_u32 = if header.size == 0 {
             0u32
         } else {
-            u32::try_from(header.size).unwrap_or(u32::MAX)
+            u32::try_from(header.size).map_err(|_| Error::AacParse {
+                message: "box size exceeds u32::MAX but header_size is 8 (extended size required)"
+                    .into(),
+            })?
         };
         out.extend_from_slice(&size_u32.to_be_bytes());
         out.extend_from_slice(&header.box_type.to_be_bytes());
-        out
+        Ok(out)
     }
 }
 
