@@ -1,40 +1,37 @@
-use std::env;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter};
 use std::path::Path;
 use std::process::ExitCode;
 
-const USAGE: &str = "Usage: m4againrs <input.m4a|-> <output.m4a|-> <gain_steps>";
+use clap::Parser;
+
+/// Apply a fixed gain (in 1.5 dB AAC native steps) to an M4A/MP4 file.
+///
+/// Use `-` as INPUT to read from stdin (requires faststart input — moov before
+/// mdat) and/or as OUTPUT to write to stdout. The source file is never
+/// overwritten.
+#[derive(Parser, Debug)]
+#[command(
+    name = "m4againrs",
+    version,
+    about,
+    long_about = None,
+    allow_negative_numbers = true,
+)]
+struct Cli {
+    /// Source M4A path, or `-` to read from stdin.
+    input: String,
+    /// Destination M4A path, or `-` to write to stdout.
+    output: String,
+    /// Signed integer gain steps (one step = 1.5 dB). Must be non-zero.
+    #[arg(long = "gain-steps", value_name = "STEPS", allow_hyphen_values = true)]
+    gain_steps: i32,
+}
 
 fn main() -> ExitCode {
-    let mut args = env::args().skip(1);
+    let cli = Cli::parse();
 
-    let Some(input) = args.next() else {
-        eprintln!("{USAGE}");
-        return ExitCode::from(2);
-    };
-    let Some(output) = args.next() else {
-        eprintln!("{USAGE}");
-        return ExitCode::from(2);
-    };
-    let Some(steps_arg) = args.next() else {
-        eprintln!("{USAGE}");
-        return ExitCode::from(2);
-    };
-    if args.next().is_some() {
-        eprintln!("{USAGE}");
-        return ExitCode::from(2);
-    }
-
-    let gain_steps: i32 = match steps_arg.parse() {
-        Ok(n) => n,
-        Err(_) => {
-            eprintln!("error: <gain_steps> must be an integer (got {steps_arg:?})");
-            return ExitCode::from(2);
-        }
-    };
-
-    match run(&input, &output, gain_steps) {
+    match run(&cli.input, &cli.output, cli.gain_steps) {
         Ok(_) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e}");
