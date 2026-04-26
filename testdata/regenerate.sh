@@ -3,13 +3,18 @@
 # tests (tests/file_api.rs) and the Python binding tests
 # (python/tests/test_python_bindings.py).
 #
-#   tagged_tone.m4a    — short AAC tone with rich iTunes metadata; used to
-#                        prove gain adjustment preserves container metadata
-#                        byte-for-byte.
-#   test_faststart.m4a — faststart (moov-before-mdat) remux of test.m4a;
-#                        required by the streaming-input tests.
+#   tagged_tone.m4a        — short AAC tone with rich iTunes metadata; used to
+#                            prove gain adjustment preserves container metadata
+#                            byte-for-byte.
+#   test_faststart.m4a     — faststart (moov-before-mdat) remux of test.m4a;
+#                            required by the streaming-input tests.
+#   he_aacv2_faststart.m4a — faststart remux of he_aacv2.m4a; used by the
+#                            HE-AACv2 streaming-input tests.
 #
-# test.m4a itself is committed source data and is not regenerated.
+# test.m4a and he_aacv2.m4a are committed source data and are not regenerated.
+# he_aacv2.m4a was sliced (with `-c copy`) from a longer real-world HE-AACv2
+# (Parametric Stereo) capture to exercise the gain rewriter against an
+# AAC profile that goes beyond plain LC.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -29,5 +34,9 @@ ffmpeg -hide_banner -loglevel error \
 ffmpeg -hide_banner -loglevel error \
     -i test.m4a -c copy -movflags +faststart -y test_faststart.m4a
 
+ffmpeg -hide_banner -loglevel error \
+    -i he_aacv2.m4a -c copy -movflags +faststart -y he_aacv2_faststart.m4a
+
 echo "generated: $(pwd)/tagged_tone.m4a"
 echo "generated: $(pwd)/test_faststart.m4a"
+echo "generated: $(pwd)/he_aacv2_faststart.m4a"

@@ -240,6 +240,76 @@ fn streaming_api_matches_writer_api_for_faststart_input() {
     assert_eq!(writer_out, streaming_out);
 }
 
+#[test]
+fn file_api_applies_gain_to_he_aacv2_fixture() {
+    let tmp = TestDir::new("file-api-he-aacv2");
+
+    for steps in [2, -2] {
+        let src = tmp.join(format!("in-{steps}.m4a"));
+        let dst = tmp.join(format!("out-{steps}.m4a"));
+        copy_fixture(&testdata_path("he_aacv2.m4a"), &src);
+        let src_bytes = fs::read(&src).expect("failed to read source fixture");
+        let src_ranges = sample_byte_ranges(&src_bytes);
+
+        let modified = m4againrs::aac_apply_gain_file(&src, &dst, steps)
+            .expect("gain application should succeed for HE-AACv2");
+
+        assert!(modified > 0);
+        assert_eq!(fs::read(&src).expect("failed to reread source"), src_bytes);
+
+        let dst_bytes = fs::read(&dst).expect("failed to read output fixture");
+        let dst_ranges = sample_byte_ranges(&dst_bytes);
+        assert_same_sample_sizes(&src_ranges, &dst_ranges);
+        assert!(
+            sample_payloads_differ(&src_bytes, &dst_bytes, &src_ranges, &dst_ranges),
+            "no AAC sample bytes changed for HE-AACv2 gain_steps={steps}"
+        );
+    }
+}
+
+#[test]
+fn streaming_api_patches_he_aacv2_faststart_fixture() {
+    let bytes = fs::read(testdata_path("he_aacv2_faststart.m4a"))
+        .expect("failed to read HE-AACv2 faststart fixture");
+    let src_ranges = sample_byte_ranges(&bytes);
+    let mut src = Cursor::new(&bytes);
+    let mut dst = Vec::new();
+
+    let modified = m4againrs::aac_apply_gain_streaming(&mut src, &mut dst, 3)
+        .expect("streaming API should accept HE-AACv2 faststart input");
+
+    assert!(modified > 0);
+    let dst_ranges = sample_byte_ranges(&dst);
+    assert_same_sample_sizes(&src_ranges, &dst_ranges);
+    assert!(
+        sample_payloads_differ(&bytes, &dst, &src_ranges, &dst_ranges),
+        "no AAC sample bytes changed for HE-AACv2"
+    );
+    assert_eq!(
+        parse_itunes_tags(&dst).get(b"M4AG".as_slice()),
+        Some(&b"m4againrs version=1 gain_steps=3 gain_step_db=1.5".to_vec())
+    );
+}
+
+#[test]
+fn streaming_api_matches_writer_api_for_he_aacv2_faststart_input() {
+    let bytes = fs::read(testdata_path("he_aacv2_faststart.m4a"))
+        .expect("failed to read HE-AACv2 faststart fixture");
+
+    let mut writer_out = Vec::new();
+    let writer_modified =
+        m4againrs::aac_apply_gain_to_writer(&mut Cursor::new(&bytes), &mut writer_out, 3)
+            .expect("writer API should accept HE-AACv2 faststart input");
+
+    let mut streaming_out = Vec::new();
+    let streaming_modified =
+        m4againrs::aac_apply_gain_streaming(&mut Cursor::new(&bytes), &mut streaming_out, 3)
+            .expect("streaming API should accept HE-AACv2 faststart input");
+
+    assert_eq!(writer_modified, streaming_modified);
+    assert_eq!(writer_out, streaming_out);
+}
+
 fn copy_fixture(src: &Path, dst: &Path) {
     fs::copy(src, dst).expect("failed to copy fixture");
 }
