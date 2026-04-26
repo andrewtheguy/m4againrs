@@ -3,6 +3,8 @@
 //! Public entry points:
 //!   - [`aac_apply_gain_file`] – path-based file rewrite.
 //!   - [`aac_apply_gain_to_writer`] – seekable input → forward-only writer.
+//!   - [`aac_apply_gain_streaming`] – forward-only on both ends; requires
+//!     faststart (`moov`-before-`mdat`) input.
 
 pub const GAIN_STEP_DB: f64 = 1.5;
 
@@ -14,4 +16,4 @@ mod gain;
 mod mp4;
 
 pub use error::{Error, Result};
-pub use gain::{aac_apply_gain_file, aac_apply_gain_to_writer};
+pub use gain::{aac_apply_gain_file, aac_apply_gain_streaming, aac_apply_gain_to_writer};

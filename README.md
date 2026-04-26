@@ -49,6 +49,21 @@ let mut output = Vec::new();
 m4againrs::aac_apply_gain_to_writer(&mut input, &mut output, 2)?;
 ```
 
+For fully-streaming use (forward-only on both ends — e.g. piping from stdin
+to stdout), pass any `std::io::Read` input and any `std::io::Write` output.
+The input must be **faststart** (`moov` box before `mdat`); non-faststart
+inputs return `Error::NonFaststartInput` — re-mux with
+`ffmpeg -movflags +faststart` or fall back to `aac_apply_gain_to_writer` with
+a seekable source.
+
+```rust
+use std::io;
+
+let stdin = io::stdin();
+let stdout = io::stdout();
+m4againrs::aac_apply_gain_streaming(&mut stdin.lock(), &mut stdout.lock(), 2)?;
+```
+
 `gain_steps == 0` returns an `Error`, as does passing the same source and
 destination path. `m4againrs::GAIN_STEP_DB` exposes the AAC step size (1.5 dB).
 
@@ -58,17 +73,21 @@ Build and use the standalone binary:
 
 ```bash
 cargo build --release -p m4againrs-cli
-./target/release/m4againrs <input.m4a> <output.m4a|-> <gain_steps>
+./target/release/m4againrs <input.m4a|-> <output.m4a|-> <gain_steps>
 ```
 
 Three positional arguments — input path, output path, signed integer step
 count. One step is 1.5 dB. The source file is never overwritten, and a
-custom `M4AG` MP4 metadata tag is written to the destination. Use `-` as the
-output path to stream the modified M4A to stdout.
+custom `M4AG` MP4 metadata tag is written to the destination. Use `-` as
+the input path to read from stdin, and/or as the output path to stream the
+modified M4A to stdout. Stdin input requires faststart (`moov`-before-`mdat`)
+M4A; pre-process with `ffmpeg -movflags +faststart` if needed.
 
 ```bash
 m4againrs track.m4a track_louder.m4a 2     # +3.0 dB
 m4againrs track.m4a track_softer.m4a -2    # -3.0 dB
+m4againrs track.m4a - 2 > track_louder.m4a # write to stdout
+cat track.m4a | m4againrs - - 2 | mpv -    # full pipe (stdin → stdout)
 ```
 
 ## Python bindings
@@ -137,5 +156,7 @@ The Python binding tests load the built extension from the workspace
 `target/debug` or `target/release`; they do not import an installed
 `site-packages` copy.
 
-The `python/testdata/tagged_tone.m4a` fixture is committed; to regenerate it
-with ffmpeg, run `python/testdata/regenerate.sh`.
+The `testdata/` fixtures are shared by both the Rust integration tests and
+the Python binding tests. `tagged_tone.m4a` and `test_faststart.m4a` are
+committed and can be regenerated with `testdata/regenerate.sh` (requires
+ffmpeg). `test.m4a` is committed source data.
