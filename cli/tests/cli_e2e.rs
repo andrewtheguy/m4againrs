@@ -637,6 +637,25 @@ fn cli_decodes_short_window_fixture_after_gain() {
 }
 
 #[test]
+fn cli_decodes_he_aac_v1_implicit_fixture_after_gain() {
+    cli_apply_gain_to_fixture("cli-fixture-he-aac-v1", "bear_he_aac_v1.m4a", 2);
+}
+
+#[test]
+fn cli_decodes_he_aac_v2_implicit_fixture_after_gain() {
+    cli_apply_gain_to_fixture(
+        "cli-fixture-he-aac-v2-implicit",
+        "bear_he_aac_v2_implicit.m4a",
+        2,
+    );
+}
+
+#[test]
+fn cli_decodes_aac_main_fixture_after_gain() {
+    cli_apply_gain_to_fixture("cli-fixture-aac-main", "bear_aac_main.m4a", 2);
+}
+
+#[test]
 fn cli_streaming_decodes_he_aacv2_faststart_after_gain() {
     let tmp = TestDir::new("cli-stream-he-aacv2-faststart");
     let captured = tmp.join("captured.m4a");

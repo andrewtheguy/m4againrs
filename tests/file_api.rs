@@ -342,6 +342,35 @@ fn file_api_applies_gain_to_short_window_fixture() {
 }
 
 #[test]
+fn file_api_applies_gain_to_he_aac_v1_implicit_fixture() {
+    // Implicit-signalling HE-AAC v1: the ASC says LC@24kHz/stereo but the
+    // bitstream carries an SBR extension that ffmpeg detects at decode. Our
+    // parser ignores AOT and just walks the AAC LC raw_data_block, so this
+    // proves that path also works for implicit HE-AAC v1.
+    apply_and_check_positive_gain("file-api-he-aac-v1", "bear_he_aac_v1.m4a", 2);
+}
+
+#[test]
+fn file_api_applies_gain_to_he_aac_v2_implicit_fixture() {
+    // Implicit-signalling HE-AAC v2 (ASC says LC@24kHz/mono; SBR+PS in
+    // bitstream). Distinct from he_aacv2.m4a which uses explicit signalling at
+    // 44.1 kHz stereo.
+    apply_and_check_positive_gain(
+        "file-api-he-aac-v2-implicit",
+        "bear_he_aac_v2_implicit.m4a",
+        2,
+    );
+}
+
+#[test]
+fn file_api_applies_gain_to_aac_main_fixture() {
+    // AAC Main profile (AOT=1). Our parser handles it as long as no frame
+    // sets predictor_data_present=1; this Photoprism sample doesn't, so the
+    // gain rewrite proceeds normally.
+    apply_and_check_positive_gain("file-api-aac-main", "bear_aac_main.m4a", 2);
+}
+
+#[test]
 fn streaming_api_matches_writer_api_for_he_aacv2_faststart_input() {
     let bytes = fs::read(testdata_path("he_aacv2_faststart.m4a"))
         .expect("failed to read HE-AACv2 faststart fixture");
@@ -362,6 +391,33 @@ fn streaming_api_matches_writer_api_for_he_aacv2_faststart_input() {
 
 fn copy_fixture(src: &Path, dst: &Path) {
     fs::copy(src, dst).expect("failed to copy fixture");
+}
+
+fn apply_and_check_positive_gain(test_name: &str, fixture: &str, gain_steps: i32) {
+    let tmp = TestDir::new(test_name);
+    let src = tmp.join("in.m4a");
+    let dst = tmp.join("out.m4a");
+    copy_fixture(&testdata_path(fixture), &src);
+    let src_bytes = fs::read(&src).expect("failed to read fixture");
+    let src_ranges = sample_byte_ranges(&src_bytes);
+
+    let modified = m4againrs::aac_apply_gain_file(&src, &dst, gain_steps)
+        .unwrap_or_else(|e| panic!("gain application should succeed for {fixture}: {e:?}"));
+
+    assert!(modified > 0, "no gain locations patched for {fixture}");
+    assert_eq!(
+        fs::read(&src).expect("failed to reread source"),
+        src_bytes,
+        "source must be untouched"
+    );
+
+    let dst_bytes = fs::read(&dst).expect("failed to read output");
+    let dst_ranges = sample_byte_ranges(&dst_bytes);
+    assert_same_sample_sizes(&src_ranges, &dst_ranges);
+    assert!(
+        sample_payloads_differ(&src_bytes, &dst_bytes, &src_ranges, &dst_ranges),
+        "no AAC sample bytes changed for {fixture}"
+    );
 }
 
 fn testdata_path(name: &str) -> PathBuf {

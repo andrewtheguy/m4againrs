@@ -17,6 +17,19 @@
 #                            encoder switches to EIGHT_SHORT_SEQUENCE on the
 #                            attacks, exercising the short-window paths in
 #                            ics_info / section_data / spectral parsing.
+#   bear_he_aac_v1.m4a            — implicit-signalling HE-AAC v1 (SBR, no PS);
+#                                   ASC reports LC@24 kHz/stereo, SBR detected
+#                                   in the bitstream at decode time.
+#   bear_he_aac_v2_implicit.m4a   — implicit-signalling HE-AAC v2 (SBR + PS);
+#                                   ASC reports LC@24 kHz/mono, SBR+PS detected
+#                                   in the bitstream. Distinct from
+#                                   he_aacv2.m4a which uses explicit signalling.
+#   bear_aac_main.m4a             — AAC Main profile (AOT=1) at 48 kHz stereo;
+#                                   covers the non-LC AOT path.
+#
+# All three bear_*.m4a fixtures are remuxes of the public Photoprism samples
+# at https://dl.photoprism.app/samples/Formats/Audio/AAC/ — see the curl/ffmpeg
+# recipe at the bottom of this script.
 #
 # test.m4a and he_aacv2.m4a are committed source data and are not regenerated.
 # he_aacv2.m4a was sliced (with `-c copy`) from a longer real-world HE-AACv2
@@ -59,8 +72,28 @@ ffmpeg -hide_banner -loglevel error \
     -f lavfi -i "aevalsrc=exprs='if(lt(mod(n\,4096)\,200)\,0.9*sin(2*PI*1000*n/44100)\,0)':d=2:s=44100:c=mono" \
     -c:a aac -b:a 96k -y aac_lc_transient.m4a
 
+# Photoprism public AAC samples — fetched as ADTS, remuxed to M4A with -c copy
+# to preserve the original AAC bitstream. We rely on the upstream files staying
+# byte-stable; if they ever change we'll see a fixture diff in git.
+PHOTOPRISM_BASE="https://dl.photoprism.app/samples/Formats/Audio/AAC"
+for spec in \
+    "bear-audio-implicit-he-aac-v1.aac:bear_he_aac_v1.m4a" \
+    "bear-audio-implicit-he-aac-v2.aac:bear_he_aac_v2_implicit.m4a" \
+    "bear-audio-main-aac.aac:bear_aac_main.m4a"
+do
+    src_name="${spec%%:*}"
+    dst_name="${spec##*:}"
+    tmp_src="$(mktemp --suffix=.aac)"
+    curl -sSL --fail -o "$tmp_src" "$PHOTOPRISM_BASE/$src_name"
+    ffmpeg -hide_banner -loglevel error -i "$tmp_src" -c copy -y "$dst_name"
+    rm -f "$tmp_src"
+done
+
 echo "generated: $(pwd)/tagged_tone.m4a"
 echo "generated: $(pwd)/test_faststart.m4a"
 echo "generated: $(pwd)/he_aacv2_faststart.m4a"
 echo "generated: $(pwd)/aac_lc_51.m4a"
 echo "generated: $(pwd)/aac_lc_transient.m4a"
+echo "generated: $(pwd)/bear_he_aac_v1.m4a"
+echo "generated: $(pwd)/bear_he_aac_v2_implicit.m4a"
+echo "generated: $(pwd)/bear_aac_main.m4a"
